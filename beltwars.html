@@ -395,7 +395,7 @@ const FIREBASE_CONFIG = {
       </div>
       <!-- Mode selection -->
       <div class="lobby-mode-btns">
-        <button class="lobby-mode-btn" id="btn-mode-solo">⬡ SOLO</button>
+        <button class="lobby-mode-btn active" id="btn-mode-solo">⬡ SOLO</button>
         <button class="lobby-mode-btn"        id="btn-mode-multi">⇄ MULTIPLAYER</button>
       </div>
 
@@ -881,6 +881,9 @@ const UI = {
     origStop:  0,      // command.stopStep at drag start
   },
 
+  // Prediction dirty flag — prediction only recomputes on input change, not every frame
+  predictionDirty: true,
+
   // Prediction dots — clickable circles drawn on the prediction path.
   // Rebuilt each frame. Not persisted. Format: [{sx, sy, step}]
   predDots: [],
@@ -1001,17 +1004,9 @@ function simulate(startPos, startVel, startAngle, startAngVel, cmds, startCheckI
       if (s < c.startStep || s >= c.stopStep) continue;
 
       if (c.type === 'rotate') {
-        // Angular mechanics: τ = I·α  →  α = τ/I
-        // Torque is stored in kN·m; convert to N·m by * 1000.
-        // angVel accumulates across steps just like linear velocity.
         const alpha = ((c.torque * 1000) / CONFIG.SHIP_MOI) * (c.cw ? -1 : 1);
         angVel += alpha * CONFIG.DT;
-
       } else {
-        // Linear thrust: F = M·a  →  a = F/M
-        // Convert local ship direction (lx,ly) to world direction
-        // using the current angle. This means a rotation command
-        // earlier in the turn affects where thrust points later.
         const tr = TRACKS.find(t => t.id === c.track);
         if (!tr) continue;
         const wx = tr.lx * Math.cos(angle) - tr.ly * Math.sin(angle);
@@ -1022,12 +1017,19 @@ function simulate(startPos, startVel, startAngle, startAngVel, cmds, startCheckI
       }
     }
 
-    // ── Integrate velocity → position ───────────────────────
-    // This is Euler integration: simple and sufficient at small DT.
-    angle += angVel * CONFIG.DT;
-    const prevX = pos.x, prevY = pos.y;
-    pos.x += vel.x * CONFIG.DT;
-    pos.y += vel.y * CONFIG.DT;
+    // ── Adaptive substeps ───────────────────────────────────
+    // At high velocity one step can skip over a small rock entirely.
+    // Substeps subdivide the movement so the sweep test has a smaller
+    // segment to check — critical for fast projectiles later.
+    const speed = Math.hypot(vel.x, vel.y);
+    const substeps = speed > 20 ? 4 : speed > 10 ? 2 : 1;
+    const subDT = CONFIG.DT / substeps;
+
+    for (let sub = 0; sub < substeps; sub++) {
+      angle += angVel * subDT;
+      const prevX = pos.x, prevY = pos.y;
+      pos.x += vel.x * subDT;
+      pos.y += vel.y * subDT;
 
     // ── Rock collision detection ─────────────────────────────
     // Two-phase: broad (circle) then narrow (polygon sweep).
@@ -1063,8 +1065,9 @@ function simulate(startPos, startVel, startAngle, startAngVel, cmds, startCheckI
         break;
       }
     }
+    } // end substep loop
 
-    // Record this timestep's state in the trail
+    // Record this timestep's state in the trail (once per main step, not per substep)
     trail.push({ x:pos.x, y:pos.y, angle, vx:vel.x, vy:vel.y, angVel });
 
     // ── Checkpoint detection ─────────────────────────────────
@@ -1279,7 +1282,14 @@ function render() {
   if (UI.overlays.rocks)    drawRocks();
   if (UI.overlays.beacons)  drawBeacons();
   if (UI.overlays.bounds)   drawBounds();
-  if (!UI.playing && UI.overlays.predict) drawPrediction();
+  if (!UI.playing && UI.overlays.predict) {
+    if (UI.predictionDirty) {
+      drawPrediction();
+      UI.predictionDirty = false;
+    } else {
+      drawCachedPrediction();
+    }
+  }
   drawShip();
   updateReadouts();
   drawPanIndicator(W, H);
@@ -1417,9 +1427,22 @@ function drawBeacons() {
 // command queue is executed. Drawn as dots every 10 steps plus
 // blue heading ticks showing the ship's rotation at each point.
 // Also shows the T+100 endpoint and a dashed velocity arrow there.
+// Cache for prediction result — only recomputed when predictionDirty is true
+let predictionCache = null;
+
 function drawPrediction() {
-  const result = simulate(State.ship.pos, State.ship.vel, State.ship.angle, State.ship.angVel, State.commands, State.nextCheckIdx, State.rocks);
-  const trail  = result.trail;
+  // Recompute and cache
+  predictionCache = simulate(State.ship.pos, State.ship.vel, State.ship.angle, State.ship.angVel, State.commands, State.nextCheckIdx, State.rocks);
+  drawPredictionFromResult(predictionCache);
+}
+
+// Draw prediction from a cached result without re-simulating
+function drawCachedPrediction() {
+  if (predictionCache) drawPredictionFromResult(predictionCache);
+}
+
+function drawPredictionFromResult(result) {
+  const trail = result.trail;
   if (trail.length < 2) return;
   UI.predDots = [];
 
@@ -1758,7 +1781,7 @@ window.addEventListener('mousemove', e => {
 // window.mouseup: always fires on release, even if cursor is off canvas
 window.addEventListener('mouseup', () => {
   if (!UI.drag.active) return;
-  updateSelInfo();
+  updateSelInfo(); markPredictionDirty();
   UI.drag.active=false;
   seqC.style.cursor='crosshair';
   renderSeq();
@@ -1810,7 +1833,7 @@ window.addEventListener('keydown', e => {
   if ((e.key==='Delete'||e.key==='Backspace') && UI.selCmd && !UI.playing) {
     State.commands = State.commands.filter(c => c !== UI.selCmd);
     UI.selCmd = null;
-    updateSelPanel(); renderSeq();
+    updateSelPanel(); markPredictionDirty(); renderSeq();
     setStatus('COMMAND REMOVED');
   }
 });
@@ -1906,10 +1929,13 @@ function updateRotDerived() {
 
 // ── Command panel controls ───────────────────────────────────
 
+// Mark prediction dirty — call whenever commands change
+function markPredictionDirty() { UI.predictionDirty = true; predictionCache = null; }
+
 document.getElementById('mag-slider').addEventListener('input',function(){
   const n=parseFloat(this.value);
   document.getElementById('mag-disp').textContent=(n/1000).toFixed(0)+' kN';
-  if (UI.selCmd&&UI.selCmd.type==='thrust') { UI.selCmd.newtons=n; updateDerived(); renderSeq(); }
+  if (UI.selCmd&&UI.selCmd.type==='thrust') { UI.selCmd.newtons=n; updateDerived(); markPredictionDirty(); renderSeq(); }
 });
 
 document.getElementById('deg-input').addEventListener('input',function(){
@@ -1917,7 +1943,7 @@ document.getElementById('deg-input').addEventListener('input',function(){
   const disp=document.getElementById('torque-disp');
   if (v===0) { disp.textContent='0 kN·m'; disp.style.color='var(--text-dim)'; }
   else { disp.textContent=(v>0?'↻ ':'↺ ')+Math.abs(v).toFixed(0)+' kN·m'; disp.style.color='var(--warning)'; }
-  if (UI.selCmd&&UI.selCmd.type==='rotate') { UI.selCmd.torque=Math.abs(v); UI.selCmd.cw=v>=0; updateRotDerived(); renderSeq(); }
+  if (UI.selCmd&&UI.selCmd.type==='rotate') { UI.selCmd.torque=Math.abs(v); UI.selCmd.cw=v>=0; updateRotDerived(); markPredictionDirty(); renderSeq(); }
 });
 
 document.getElementById('btn-ccw').addEventListener('click',function(){
@@ -2033,6 +2059,7 @@ function resolveTurn(myCommands, oppCommands, logEntry) {
     }
 
     document.getElementById('phase').textContent = 'PLANNING';
+    markPredictionDirty();
     const execBtn = document.getElementById('btn-exec');
 
     if (State.nextCheckIdx >= CHECKPOINT_ORDER.length) {
@@ -2113,7 +2140,7 @@ document.getElementById('btn-exec').addEventListener('click', function() {
 
 document.getElementById('btn-clear').addEventListener('click',()=>{
   if (UI.playing) return;
-  State.commands=[]; UI.selCmd=null; updateSelPanel(); renderSeq();
+  State.commands=[]; UI.selCmd=null; updateSelPanel(); markPredictionDirty(); renderSeq();
   setStatus('ALL COMMANDS CLEARED');
 });
 
@@ -2292,6 +2319,7 @@ function launchGame(overrideConfig) {
   document.getElementById('phase').textContent='PLANNING';
   document.getElementById('btn-exec').disabled=false;
   document.getElementById('pilot-display').textContent = Pilot.name || 'HULL-01';
+  markPredictionDirty();
   updateSelPanel(); renderSeq();
   document.getElementById('menu-overlay').classList.add('hidden');
   setStatus(`MISSION LAUNCHED — SEED: ${State.courseConfig.seed} · ${State.rocks.length} ROCKS · NEXT: BETA`);
@@ -2420,7 +2448,7 @@ function applyModal() {
     modalTarget.torque=Math.min(25,Math.max(1,parseFloat(document.getElementById('m-deg').value)||25));
     modalTarget.cw=document.getElementById('m-cw').classList.contains('active');
   }
-  selectCmd(modalTarget); closeModal(); renderSeq(); setStatus('COMMAND UPDATED');
+  selectCmd(modalTarget); closeModal(); markPredictionDirty(); renderSeq(); setStatus('COMMAND UPDATED');
 }
 
 document.getElementById('m-ok').addEventListener('click',applyModal);
