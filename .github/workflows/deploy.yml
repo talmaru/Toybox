@@ -21,15 +21,11 @@ jobs:
           FIREBASE_MESSAGING_SENDER_ID: ${{ secrets.FIREBASE_MESSAGING_SENDER_ID }}
           FIREBASE_APP_ID: ${{ secrets.FIREBASE_APP_ID }}
         run: |
-          echo "const FIREBASE_CONFIG = {" > ${{ github.workspace }}/firebase-config.js
-          echo "  apiKey:            \"$FIREBASE_API_KEY\"," >> ${{ github.workspace }}/firebase-config.js
-          echo "  authDomain:        \"toyboxspacerace.firebaseapp.com\"," >> ${{ github.workspace }}/firebase-config.js
-          echo "  databaseURL:       \"$FIREBASE_DATABASE_URL\"," >> ${{ github.workspace }}/firebase-config.js
-          echo "  projectId:         \"$FIREBASE_PROJECT_ID\"," >> ${{ github.workspace }}/firebase-config.js
-          echo "  storageBucket:     \"toyboxspacerace.firebasestorage.app\"," >> ${{ github.workspace }}/firebase-config.js
-          echo "  messagingSenderId: \"$FIREBASE_MESSAGING_SENDER_ID\"," >> ${{ github.workspace }}/firebase-config.js
-          echo "  appId:             \"$FIREBASE_APP_ID\"," >> ${{ github.workspace }}/firebase-config.js
-          echo "};" >> ${{ github.workspace }}/firebase-config.js
+          sed -i "s|PLACEHOLDER_API_KEY|$FIREBASE_API_KEY|g" beltwars.html
+          sed -i "s|PLACEHOLDER_DATABASE_URL|$FIREBASE_DATABASE_URL|g" beltwars.html
+          sed -i "s|PLACEHOLDER_PROJECT_ID|$FIREBASE_PROJECT_ID|g" beltwars.html
+          sed -i "s|PLACEHOLDER_MESSAGING_SENDER_ID|$FIREBASE_MESSAGING_SENDER_ID|g" beltwars.html
+          sed -i "s|PLACEHOLDER_APP_ID|$FIREBASE_APP_ID|g" beltwars.html
 
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v4
