@@ -2009,14 +2009,17 @@ function resolveTurn(myCommands, oppCommands, logEntry) {
 
   const myResult  = simulate(State.ship.pos, State.ship.vel, State.ship.angle,
                               State.ship.angVel, myCommands, State.nextCheckIdx, State.rocks);
-  logEntry.trail       = myResult.trail;
-  logEntry.checkpoints = myResult.checkpointEvents;
 
   // Simulate opponent from their current position (multiplayer only)
   const oppResult = (State.opponent && oppCommands)
     ? simulate(State.opponent.pos, State.opponent.vel, State.opponent.angle,
                 State.opponent.angVel, oppCommands, State.nextCheckIdx, State.rocks)
     : null;
+
+  // Store both trails in the log entry so replay can show both ships
+  logEntry.trail       = myResult.trail;
+  logEntry.checkpoints = myResult.checkpointEvents;
+  logEntry.oppTrail    = oppResult ? oppResult.trail : [];
 
   playbackTurn(myResult, oppResult, () => {
     commitTurn(myResult, logEntry);
@@ -2142,8 +2145,13 @@ function playReplayTurn() {
   State.ship.vel    ={...entry.startVel};
   State.ship.angle  =entry.startAngle;
   State.ship.angVel =entry.startAngVel;
-  UI.pbPositions=entry.trail; UI.pbStep=0;
-  UI.playing=true; UI.panOffset={x:0,y:0};
+
+  // Set both trails — zoom/pan preserved so camera doesn't jump between turns
+  UI.pbPositions = entry.trail;
+  UI.oppTrail    = entry.oppTrail || [];
+  UI.pbStep      = 0;
+  UI.playing     = true;
+  // Note: UI.panOffset intentionally NOT reset — preserves player's zoom/pan state
 
   document.getElementById('replay-turn-disp').textContent=
     `TURN ${entry.turn} / ${State.replayLog.length}`;
@@ -2162,9 +2170,9 @@ function playReplayTurn() {
       State.ship.vel   ={x:last.vx,y:last.vy};
       State.ship.angle = last.angle;
       State.ship.angVel= last.angVel||0;
-      UI.pbPositions=[]; UI.pbStep=0; UI.playing=false;
+      UI.pbPositions=[]; UI.oppTrail=[]; UI.pbStep=0; UI.playing=false;
       Replay.turnIdx++;
-      setTimeout(playReplayTurn,400); // brief pause between turns
+      setTimeout(playReplayTurn,400);
     }
   }, CONFIG.PLAYBACK_MS);
 }
@@ -2573,14 +2581,35 @@ document.getElementById('btn-join-room').addEventListener('click', async () => {
     lobbySetStatus('ROOM IS FULL', 'error'); return;
   }
 
-  // Join as beta player
+  // Join as beta player — check for name collision with alpha
   Lobby.roomId  = code;
   Lobby.mySlot  = 'beta';
   Lobby.isHost  = false;
   Lobby.roomRef = roomRef;
 
+  // Deduplicate name against existing alpha player
+  let myName = Pilot.name || 'PILOT';
+  if (data.players?.alpha?.name === myName) {
+    myName = myName + '-2';
+    Pilot.name = myName;
+    document.getElementById('pilot-name').value = myName;
+  }
+
+  // Deduplicate colour against existing alpha player
+  const COLOURS = ['#00ff88','#00aaff','#ffaa00','#ff4444','#cc44ff','#ff8844','#44ffcc','#ffffff'];
+  let myColour = Pilot.colour;
+  if (data.players?.alpha?.colour === myColour) {
+    const idx = COLOURS.indexOf(myColour);
+    myColour = COLOURS[(idx + 1) % COLOURS.length];
+    Pilot.colour = myColour;
+    // Update swatch selection visually
+    document.querySelectorAll('.colour-swatch').forEach(s => {
+      s.classList.toggle('active', s.dataset.colour === myColour);
+    });
+  }
+
   await update(ref(db, `games/${code}/players`), {
-    beta: { uid, name: Pilot.name||'PILOT', colour: Pilot.colour }
+    beta: { uid, name: myName, colour: myColour }
   });
 
   showRoomDisplay(code);
