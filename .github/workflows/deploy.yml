@@ -21,17 +21,15 @@ jobs:
           FIREBASE_MESSAGING_SENDER_ID: ${{ secrets.FIREBASE_MESSAGING_SENDER_ID }}
           FIREBASE_APP_ID: ${{ secrets.FIREBASE_APP_ID }}
         run: |
-          echo "const FIREBASE_CONFIG = {" > firebase-config.js
-          echo "  apiKey:            \"$FIREBASE_API_KEY\"," >> firebase-config.js
-          echo "  authDomain:        \"toyboxspacerace.firebaseapp.com\"," >> firebase-config.js
-          echo "  databaseURL:       \"$FIREBASE_DATABASE_URL\"," >> firebase-config.js
-          echo "  projectId:         \"$FIREBASE_PROJECT_ID\"," >> firebase-config.js
-          echo "  storageBucket:     \"toyboxspacerace.firebasestorage.app\"," >> firebase-config.js
-          echo "  messagingSenderId: \"$FIREBASE_MESSAGING_SENDER_ID\"," >> firebase-config.js
-          echo "  appId:             \"$FIREBASE_APP_ID\"," >> firebase-config.js
-          echo "};" >> firebase-config.js
-          ls -la firebase-config.js
-          cat firebase-config.js
+          echo "const FIREBASE_CONFIG = {" > ${{ github.workspace }}/firebase-config.js
+          echo "  apiKey:            \"$FIREBASE_API_KEY\"," >> ${{ github.workspace }}/firebase-config.js
+          echo "  authDomain:        \"toyboxspacerace.firebaseapp.com\"," >> ${{ github.workspace }}/firebase-config.js
+          echo "  databaseURL:       \"$FIREBASE_DATABASE_URL\"," >> ${{ github.workspace }}/firebase-config.js
+          echo "  projectId:         \"$FIREBASE_PROJECT_ID\"," >> ${{ github.workspace }}/firebase-config.js
+          echo "  storageBucket:     \"toyboxspacerace.firebasestorage.app\"," >> ${{ github.workspace }}/firebase-config.js
+          echo "  messagingSenderId: \"$FIREBASE_MESSAGING_SENDER_ID\"," >> ${{ github.workspace }}/firebase-config.js
+          echo "  appId:             \"$FIREBASE_APP_ID\"," >> ${{ github.workspace }}/firebase-config.js
+          echo "};" >> ${{ github.workspace }}/firebase-config.js
 
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v4
