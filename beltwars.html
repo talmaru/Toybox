@@ -1513,6 +1513,29 @@ function drawShip() {
       mctx.fillStyle='#1a3a5a';
       mctx.fillText(`[${oppPos.x.toFixed(1)}, ${oppPos.y.toFixed(1)}]`,os.x+13,os.y+7);
     }
+
+    // Opponent velocity arrow
+    const oppVel = (UI.playing && UI.oppTrail.length > 0)
+      ? { x: oppPos.vx || 0, y: oppPos.vy || 0 }
+      : { x: State.opponent.vel.x, y: State.opponent.vel.y };
+    const oppSpd = Math.hypot(oppVel.x, oppVel.y);
+    if (UI.overlays.velArrow && oppSpd > 0.001) {
+      const ove  = w2s(oppPos.x + oppVel.x*0.6, oppPos.y + oppVel.y*0.6);
+      const ova  = Math.atan2(-(ove.y-os.y), ove.x-os.x);
+      const ah   = 6;
+      mctx.strokeStyle='#0088cc'; mctx.lineWidth=1.5;
+      mctx.beginPath(); mctx.moveTo(os.x,os.y); mctx.lineTo(ove.x,ove.y); mctx.stroke();
+      mctx.fillStyle='#0088cc';
+      mctx.beginPath(); mctx.moveTo(ove.x,ove.y);
+      mctx.lineTo(ove.x-ah*Math.cos(ova-0.45),ove.y+ah*Math.sin(ova-0.45));
+      mctx.lineTo(ove.x-ah*Math.cos(ova+0.45),ove.y+ah*Math.sin(ova+0.45));
+      mctx.closePath(); mctx.fill();
+      if (UI.overlays.labels) {
+        mctx.fillStyle='#0088cc'; mctx.font='9px Courier New';
+        mctx.fillText(`${oppSpd.toFixed(2)} km/s`,
+          (os.x+ove.x)/2+5, (os.y+ove.y)/2-4);
+      }
+    }
   }
 } // end drawShip
 
