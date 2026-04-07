@@ -1,0 +1,2673 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>BELT WARS — Prototype</title>
+
+<!-- ── FIREBASE CONFIG ───────────────────────────────────────
+     Loaded from an external file that is gitignored.
+     See firebase-config.example.js for the template.        -->
+<script src="firebase-config.js"></script>
+
+<!-- ── FIREBASE SDK ─────────────────────────────────────────
+     ES module — bridged to window.FB for the main script.   -->
+<script type="module">
+  import { initializeApp }
+    from "https://www.gstatic.com/firebasejs/12.11.0/firebase-app.js";
+  import { getDatabase, ref, set, get, update, onValue, off, remove }
+    from "https://www.gstatic.com/firebasejs/12.11.0/firebase-database.js";
+  import { getAuth, signInAnonymously }
+    from "https://www.gstatic.com/firebasejs/12.11.0/firebase-auth.js";
+
+  // FIREBASE_CONFIG is defined by firebase-config.js (gitignored).
+  if (typeof FIREBASE_CONFIG === 'undefined') {
+    console.error('firebase-config.js not found — multiplayer will not work.');
+  }
+
+  const app  = initializeApp(FIREBASE_CONFIG);
+  const db   = getDatabase(app);
+  const auth = getAuth(app);
+
+  // Sign in anonymously — gives each browser a verified UID without
+  // requiring the player to create an account.
+  const cred = await signInAnonymously(auth);
+  const uid  = cred.user.uid;
+
+  // Bridge Firebase to the main game script via window.
+  // The main script listens for 'firebase-ready' before using these.
+  window.FB = { db, ref, set, get, update, onValue, off, remove, uid };
+  window.dispatchEvent(new Event('firebase-ready'));
+</script>
+<style>
+  /* ── CSS CUSTOM PROPERTIES (design tokens) ─────────────────
+     These variables define the entire colour palette.
+     Changing one here changes it everywhere on the page.     */
+  :root {
+    --bg:       #000a00;   /* deep space black-green           */
+    --dim:      #001200;   /* slightly lighter for inputs      */
+    --grid:     #001a00;   /* grid lines and borders           */
+    --text-dim: #1a4a1a;   /* muted label text                 */
+    --text:     #33aa33;   /* normal green text                */
+    --bright:   #66ff66;   /* highlighted values               */
+    --accent:   #00ff88;   /* teal — primary actions           */
+    --warning:  #ffaa00;   /* amber — velocity, rotation       */
+    --danger:   #ff3300;   /* red — errors, danger zone        */
+  }
+
+  * { margin:0; padding:0; box-sizing:border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Courier New', Courier, monospace;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;  /* header → main area → cmd panel → sequencer → status */
+    overflow: hidden;
+    user-select: none;       /* prevent text selection during drag */
+  }
+
+  /* CRT scanline overlay — purely cosmetic, pointer-events:none so it never blocks clicks */
+  body::after {
+    content: ''; position: fixed; inset: 0; pointer-events: none; z-index: 999;
+    background: repeating-linear-gradient(0deg,transparent 0px,transparent 3px,rgba(0,0,0,0.07) 3px,rgba(0,0,0,0.07) 4px);
+  }
+
+  /* ── HEADER ─────────────────────────────────────────────── */
+  #header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 5px 14px; border-bottom: 1px solid var(--grid); flex-shrink: 0;
+  }
+  .h-title { font-size: 16px; letter-spacing: 6px; color: var(--bright); text-shadow: 0 0 12px #66ff6688; }
+  .h-meta  { font-size: 12px; letter-spacing: 2px; color: var(--text-dim); }
+  .h-meta span { color: var(--text); }
+
+  /* ── MAIN AREA (viewport only — sidebar removed in refactor) */
+  #main { flex: 1; display: flex; overflow: hidden; min-height: 0; }
+  #viewport { flex: 1; position: relative; overflow: hidden; }
+  #main-canvas { display: block; width: 100%; height: 100%; }
+
+  /* ── NAV STATUS STRIP ──────────────────────────────────────
+     Horizontal readout bar showing live telemetry             */
+  #nav-strip {
+    display: flex; align-items: center; gap: 10px;
+    padding: 4px 14px; border-top: 1px solid var(--grid);
+    background: #000c00; flex-shrink: 0; flex-wrap: wrap;
+  }
+  .ns-item { font-size: 11px; color: var(--text-dim); white-space: nowrap; }
+  .ns-item span { color: var(--bright); }
+  .ns-sep { color: var(--grid); font-size: 11px; }
+
+  /* ── COMMAND PANEL ─────────────────────────────────────────
+     Shows controls for the currently selected sequencer bar.
+     Switches between "nothing selected" and "editing" modes.  */
+  #cmd-panel {
+    border-top: 1px solid var(--grid);
+    display: flex; align-items: stretch; flex-shrink: 0;
+    background: #000c00;
+  }
+  /* Shown when no bar is selected */
+  #sel-none-strip {
+    padding: 6px 14px; font-size: 11px; color: var(--text-dim);
+    display: flex; align-items: center; gap: 20px;
+  }
+  #sel-none-strip .hint { font-size: 10px; color: #0d2a0d; }
+  /* Shown when a bar is selected — flex row of control groups */
+  #sel-controls-strip {
+    display: none; flex: 1; align-items: center; gap: 16px; padding: 5px 14px;
+  }
+  .si-block { font-size: 11px; color: var(--text-dim); line-height: 1.6; white-space: nowrap; }
+  .si-block span { color: var(--text); }
+  .ctrl-row { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-dim); }
+  .ctrl-row input[type=range] { width: 120px; accent-color: var(--accent); height: 3px; }
+  .ctrl-val { color: var(--bright); min-width: 36px; font-size: 12px; }
+  .ctrl-row input[type=number] {
+    width: 60px; background: var(--dim); border: 1px solid var(--grid);
+    color: var(--bright); font-family: inherit; font-size: 12px; padding: 2px 4px; text-align: right;
+  }
+  .dir-btns { display: flex; gap: 4px; }
+  .dir-btn {
+    padding: 4px 10px; background: var(--dim); border: 1px solid var(--grid);
+    color: var(--text); font-family: inherit; font-size: 11px; letter-spacing: 1px;
+    cursor: pointer; text-align: center; transition: background 0.08s, color 0.08s;
+  }
+  .dir-btn.active { background: var(--warning); color: #000; border-color: var(--warning); }
+  .dir-btn:hover:not(.active) { border-color: var(--text); color: var(--bright); }
+  /* Execute + Clear buttons — pinned to right edge via margin-left:auto on parent */
+  .cmd-panel-btns {
+    display: flex; flex-direction: column; gap: 4px; padding: 5px 10px;
+    border-left: 1px solid var(--grid); justify-content: center; margin-left: auto;
+  }
+  .btn-exec {
+    display: block; padding: 7px 16px; background: transparent;
+    border: 1px solid var(--accent); color: var(--accent);
+    font-family: inherit; font-size: 12px; letter-spacing: 3px;
+    cursor: pointer; text-align: center; transition: background 0.12s, color 0.12s; white-space: nowrap;
+  }
+  .btn-exec:hover:not(:disabled) { background: var(--accent); color: var(--bg); }
+  .btn-exec:disabled { border-color: var(--text-dim); color: var(--text-dim); cursor: not-allowed; }
+  .btn-clear {
+    display: block; padding: 5px 16px; background: transparent;
+    border: 1px solid var(--dim); color: var(--text-dim);
+    font-family: inherit; font-size: 11px; letter-spacing: 2px;
+    cursor: pointer; text-align: center; transition: border-color 0.1s, color 0.1s; white-space: nowrap;
+  }
+  .btn-clear:hover { border-color: var(--danger); color: var(--danger); }
+
+  /* ── SEQUENCER ─────────────────────────────────────────────
+     Multi-track DAW-style timeline. Canvas drawn by renderSeq. */
+  #sequencer { border-top: 1px solid var(--grid); flex-shrink: 0; }
+  #seq-header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 3px 10px; border-bottom: 1px solid var(--grid);
+    font-size: 10px; letter-spacing: 2px; color: var(--text-dim);
+  }
+  #seq-canvas { display: block; width: 100%; cursor: crosshair; }
+
+  /* ── STATUS BAR ─────────────────────────────────────────── */
+  #statusbar {
+    border-top: 1px solid var(--grid); padding: 4px 14px;
+    font-size: 11px; letter-spacing: 1px; color: var(--text-dim); flex-shrink: 0;
+  }
+
+  /* ── OVERLAY: DISPLAY TOGGLE ───────────────────────────────
+     Checkbox panel in top-left of viewport.
+     position:absolute sits inside #viewport.               */
+  #overlay-toggle {
+    position: absolute; top: 8px; left: 8px; z-index: 100;
+    background: #000d00ee; border: 1px solid var(--grid); min-width: 160px;
+  }
+  #overlay-toggle-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 5px 8px; cursor: pointer; border-bottom: 1px solid var(--grid);
+    font-size: 10px; letter-spacing: 2px; color: var(--text-dim); user-select: none;
+  }
+  #overlay-toggle-header:hover { color: var(--bright); }
+  #overlay-toggle-header span { font-size: 10px; }
+  #overlay-items { padding: 4px 0; }
+  #overlay-items.hidden { display: none; }
+  .ov-item {
+    display: flex; align-items: center; gap: 8px;
+    padding: 3px 10px; font-size: 11px; color: var(--text-dim);
+    cursor: pointer; user-select: none;
+  }
+  .ov-item:hover { color: var(--bright); }
+  .ov-check {
+    width: 10px; height: 10px; border: 1px solid var(--text-dim);
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 9px; flex-shrink: 0;
+  }
+  .ov-check.on { border-color: var(--accent); color: var(--accent); }
+
+  /* ── OVERLAY: EDIT MODAL ───────────────────────────────────
+     Double-click a sequencer bar to open numeric editor.     */
+  #modal-overlay {
+    display: none; position: fixed; inset: 0;
+    background: rgba(0,8,0,0.75); z-index: 500;
+    align-items: center; justify-content: center;
+  }
+  #modal-overlay.open { display: flex; }
+  #modal { background: #000e00; border: 1px solid var(--accent); padding: 16px 20px; min-width: 270px; box-shadow: 0 0 40px #00ff8818; }
+  #modal-title { font-size: 12px; letter-spacing: 3px; color: var(--accent); margin-bottom: 14px; border-bottom: 1px solid var(--grid); padding-bottom: 6px; }
+  .m-row { display: flex; align-items: center; justify-content: space-between; font-size: 12px; color: var(--text-dim); margin-bottom: 10px; gap: 10px; }
+  .m-row label { letter-spacing: 1px; white-space: nowrap; }
+  .m-row input[type=number] { width: 80px; background: var(--dim); border: 1px solid var(--grid); color: var(--bright); font-family: inherit; font-size: 12px; padding: 3px 6px; text-align: right; }
+  .m-row input:focus { outline: none; border-color: var(--accent); }
+  .m-dir { display: flex; gap: 6px; width: 80px; }
+  .m-dir button { flex: 1; padding: 4px; background: var(--dim); border: 1px solid var(--grid); color: var(--text); font-family: inherit; font-size: 11px; cursor: pointer; letter-spacing: 1px; }
+  .m-dir button.active { background: var(--warning); color: #000; border-color: var(--warning); }
+  .m-btns { display: flex; gap: 8px; margin-top: 14px; border-top: 1px solid var(--grid); padding-top: 10px; }
+  .m-btn { flex: 1; padding: 7px; background: transparent; font-family: inherit; font-size: 12px; letter-spacing: 2px; cursor: pointer; }
+  .m-btn-ok     { border: 1px solid var(--accent); color: var(--accent); }
+  .m-btn-ok:hover { background: var(--accent); color: var(--bg); }
+  .m-btn-cancel { border: 1px solid var(--grid); color: var(--text-dim); }
+  .m-btn-cancel:hover { border-color: var(--danger); color: var(--danger); }
+
+  /* ── OVERLAY: MAIN MENU ────────────────────────────────────
+     Full-screen configuration screen shown before a run.     */
+  #menu-overlay {
+    position: fixed; inset: 0; z-index: 300; background: #000a00;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    font-family: 'Courier New', Courier, monospace;
+  }
+  #menu-overlay.hidden { display: none; }
+  #menu-box { width: 560px; border: 1px solid var(--accent); box-shadow: 0 0 60px #00ff8811; }
+  #menu-title-bar { padding: 20px 28px 14px; border-bottom: 1px solid var(--grid); text-align: center; }
+  #menu-title { font-size: 28px; letter-spacing: 12px; color: var(--bright); text-shadow: 0 0 20px #66ff6666; margin-bottom: 6px; }
+  #menu-sub { font-size: 10px; letter-spacing: 4px; color: var(--text-dim); }
+  #menu-lore { padding: 12px 28px; font-size: 10px; line-height: 1.8; color: #1a5a1a; border-bottom: 1px solid var(--grid); text-align: center; letter-spacing: 1px; }
+  #menu-settings { padding: 16px 28px; border-bottom: 1px solid var(--grid); }
+  .m-section-title { font-size: 9px; letter-spacing: 3px; color: var(--text-dim); margin-bottom: 12px; margin-top: 4px; }
+  .menu-row { display: flex; align-items: center; justify-content: space-between; font-size: 11px; color: var(--text-dim); margin-bottom: 10px; gap: 12px; }
+  .menu-row label { white-space: nowrap; letter-spacing: 1px; min-width: 170px; }
+  .menu-row input[type=range] { flex: 1; accent-color: var(--accent); height: 3px; }
+  .menu-row input[type=number] { width: 80px; background: var(--dim); border: 1px solid var(--grid); color: var(--bright); font-family: inherit; font-size: 11px; padding: 3px 6px; text-align: right; }
+  .menu-row input:focus { outline: none; border-color: var(--accent); }
+  .menu-val { color: var(--bright); min-width: 55px; text-align: right; font-size: 11px; }
+  .seed-row { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--text-dim); margin-bottom: 10px; }
+  .seed-row label { min-width: 170px; letter-spacing: 1px; }
+  .seed-row input[type=number] { flex: 1; background: var(--dim); border: 1px solid var(--grid); color: var(--bright); font-family: inherit; font-size: 11px; padding: 3px 6px; }
+  #btn-rand-seed { padding: 4px 10px; background: var(--dim); border: 1px solid var(--grid); color: var(--text); font-family: inherit; font-size: 10px; cursor: pointer; letter-spacing: 1px; white-space: nowrap; }
+  #btn-rand-seed:hover { border-color: var(--accent); color: var(--accent); }
+  #menu-footer { padding: 16px 28px; display: flex; gap: 10px; }
+  #btn-launch { flex: 1; padding: 12px; background: transparent; border: 1px solid var(--accent); color: var(--accent); font-family: inherit; font-size: 13px; letter-spacing: 4px; cursor: pointer; transition: background 0.12s, color 0.12s; }
+  #btn-launch:hover { background: var(--accent); color: var(--bg); }
+  #btn-exit-game { padding: 3px 10px; background: transparent; border: 1px solid var(--grid); color: var(--text-dim); font-family: inherit; font-size: 10px; letter-spacing: 2px; cursor: pointer; transition: border-color 0.1s, color 0.1s; }
+  #btn-exit-game:hover { border-color: var(--danger); color: var(--danger); }
+
+  /* ── OVERLAY: LAP COMPLETE & REPLAY ───────────────────────
+     Each overlay uses display:flex / display:none toggled
+     by adding/removing the .hidden class.                    */
+  #lap-overlay { display: flex; }
+  #lap-overlay.hidden { display: none; }
+  #cp-flash { display: block; }
+  #cp-flash.hidden { display: none; }
+  #replay-controls { display: flex; }
+  #replay-controls.hidden { display: none; }
+  #waiting-overlay { display: flex; }
+  #waiting-overlay.hidden { display: none; }
+  @keyframes pulse-dots {
+    0%,100% { opacity: 1; } 50% { opacity: 0.2; }
+  }
+  #waiting-dots { animation: pulse-dots 1.4s ease-in-out infinite; }
+
+  /* ── OVERLAY: LOBBY ────────────────────────────────────────
+     Sits in front of the menu. Player picks solo or multiplayer,
+     creates or joins a room, then proceeds to the menu to
+     configure the course.                                     */
+  #lobby-overlay {
+    position: fixed; inset: 0; z-index: 500; background: #000a00;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    font-family: 'Courier New', Courier, monospace;
+  }
+  #lobby-overlay.hidden { display: none; }
+  #lobby-box { width: 480px; border: 1px solid var(--accent); box-shadow: 0 0 60px #00ff8811; }
+  #lobby-title-bar { padding: 20px 28px 14px; border-bottom: 1px solid var(--grid); text-align: center; }
+  #lobby-status { padding: 10px 28px; font-size: 11px; letter-spacing: 2px; color: var(--text-dim); text-align: center; border-bottom: 1px solid var(--grid); min-height: 36px; }
+  #lobby-status.error { color: var(--danger); }
+  #lobby-status.ok    { color: var(--accent); }
+  #lobby-panels { padding: 20px 28px; display: flex; flex-direction: column; gap: 14px; }
+  .lobby-mode-btns { display: flex; gap: 10px; }
+  .lobby-mode-btn {
+    flex: 1; padding: 12px; background: transparent;
+    border: 1px solid var(--grid); color: var(--text-dim);
+    font-family: inherit; font-size: 12px; letter-spacing: 3px;
+    cursor: pointer; transition: border-color 0.1s, color 0.1s;
+  }
+  .lobby-mode-btn:hover  { border-color: var(--text); color: var(--text); }
+  .lobby-mode-btn.active { border-color: var(--accent); color: var(--accent); }
+  #lobby-mp-panel { display: none; flex-direction: column; gap: 10px; border-top: 1px solid var(--grid); padding-top: 14px; }
+  #lobby-mp-panel.visible { display: flex; }
+  .lobby-row { display: flex; gap: 8px; align-items: center; font-size: 11px; color: var(--text-dim); }
+  .lobby-row label { min-width: 120px; letter-spacing: 1px; }
+  .lobby-row input {
+    flex: 1; background: var(--dim); border: 1px solid var(--grid);
+    color: var(--bright); font-family: inherit; font-size: 13px;
+    padding: 5px 8px; letter-spacing: 3px; text-transform: uppercase;
+  }
+  .lobby-row input:focus { outline: none; border-color: var(--accent); }
+  .lobby-action-btn {
+    padding: 10px; background: transparent; font-family: inherit;
+    font-size: 12px; letter-spacing: 3px; cursor: pointer;
+    border: 1px solid var(--accent); color: var(--accent);
+    transition: background 0.12s, color 0.12s;
+  }
+  .lobby-action-btn:hover { background: var(--accent); color: var(--bg); }
+  .lobby-action-btn:disabled { border-color: var(--text-dim); color: var(--text-dim); cursor: not-allowed; background: transparent; }
+  #lobby-room-display { font-size: 11px; color: var(--text-dim); text-align: center; display: none; }
+  #lobby-room-code { font-size: 28px; letter-spacing: 10px; color: var(--bright); }
+  #lobby-players { display: flex; gap: 10px; margin-top: 4px; }
+  .lobby-player-slot {
+    flex: 1; padding: 8px; border: 1px solid var(--grid);
+    font-size: 11px; color: var(--text-dim); text-align: center; letter-spacing: 1px;
+  }
+  .lobby-player-slot.filled { border-color: var(--accent); color: var(--accent); }
+  #lobby-footer { padding: 14px 28px; border-top: 1px solid var(--grid); display: flex; gap: 10px; }
+  #btn-lobby-proceed {
+    flex: 1; padding: 12px; background: transparent;
+    border: 1px solid var(--accent); color: var(--accent);
+    font-family: inherit; font-size: 13px; letter-spacing: 4px;
+    cursor: pointer; transition: background 0.12s, color 0.12s;
+  }
+  #btn-lobby-proceed:hover:not(:disabled) { background: var(--accent); color: var(--bg); }
+  #btn-lobby-proceed:disabled { border-color: var(--text-dim); color: var(--text-dim); cursor: not-allowed; }
+</style>
+</head>
+<body>
+
+<!-- ── HEADER BAR ────────────────────────────────────────── -->
+<div id="header">
+  <span class="h-title">BELT WARS</span>
+  <span class="h-meta">TURN <span id="turn-num">001</span> &nbsp;|&nbsp; <span id="phase">PLANNING</span></span>
+  <span class="h-meta" style="display:flex;align-items:center;gap:14px;">
+    HULL-01 &nbsp;|&nbsp; AI INSTANCE ALPHA &nbsp;|&nbsp; ZOOM <span id="zoom-disp">55</span>px/u
+    <button id="btn-exit-game">⬡ MENU</button>
+  </span>
+</div>
+
+<!-- ── LOBBY OVERLAY ──────────────────────────────────────── -->
+<div id="lobby-overlay">
+  <div id="lobby-box">
+    <div id="lobby-title-bar">
+      <div id="menu-title">BELT WARS</div>
+      <div id="menu-sub">ASTEROID CIRCUIT SIMULATOR</div>
+    </div>
+
+    <!-- Status line — shows connection state, errors, waiting messages -->
+    <div id="lobby-status">CONNECTING TO NETWORK...</div>
+
+    <div id="lobby-panels">
+      <!-- Mode selection -->
+      <div class="lobby-mode-btns">
+        <button class="lobby-mode-btn active" id="btn-mode-solo">⬡ SOLO</button>
+        <button class="lobby-mode-btn"        id="btn-mode-multi">⇄ MULTIPLAYER</button>
+      </div>
+
+      <!-- Multiplayer sub-panel — hidden until mode is selected -->
+      <div id="lobby-mp-panel">
+        <!-- Create a new room -->
+        <div style="display:flex;gap:8px;">
+          <button class="lobby-action-btn" id="btn-create-room" style="flex:1;">+ CREATE ROOM</button>
+        </div>
+
+        <!-- OR join an existing room by code -->
+        <div class="lobby-row">
+          <label>JOIN ROOM CODE</label>
+          <input type="text" id="join-code-input" maxlength="6" placeholder="XXXXXX">
+          <button class="lobby-action-btn" id="btn-join-room">JOIN</button>
+        </div>
+
+        <!-- Room display — shown after create or join succeeds -->
+        <div id="lobby-room-display">
+          <div style="font-size:10px;letter-spacing:3px;margin-bottom:6px;">ROOM CODE</div>
+          <div id="lobby-room-code">——————</div>
+          <button id="btn-copy-code" style="margin-top:6px;padding:4px 12px;background:transparent;border:1px solid var(--grid);color:var(--text-dim);font-family:inherit;font-size:10px;letter-spacing:2px;cursor:pointer;" onclick="navigator.clipboard.writeText(document.getElementById('lobby-room-code').textContent).then(()=>{this.textContent='✓ COPIED';setTimeout(()=>this.textContent='⧉ COPY CODE',1500)})">⧉ COPY CODE</button>
+          <div style="font-size:10px;letter-spacing:2px;margin:8px 0 6px;color:var(--text-dim);">PLAYERS</div>
+          <div id="lobby-players">
+            <div class="lobby-player-slot" id="slot-alpha">ALPHA — WAITING</div>
+            <div class="lobby-player-slot" id="slot-beta"> BETA  — WAITING</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="lobby-footer">
+      <button id="btn-lobby-proceed" disabled>▶ PROCEED TO CONFIGURATION</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── OVERLAY: NON-HOST WAITING FOR HOST TO LAUNCH ──────── -->
+<div id="waiting-overlay" class="hidden" style="position:fixed;inset:0;z-index:300;background:#000a00;flex-direction:column;align-items:center;justify-content:center;font-family:'Courier New',monospace;">
+  <div style="border:1px solid var(--accent);box-shadow:0 0 60px #00ff8811;padding:40px 52px;text-align:center;">
+    <div style="font-size:11px;letter-spacing:4px;color:var(--text-dim);margin-bottom:10px;">MULTIPLAYER</div>
+    <div style="font-size:22px;letter-spacing:8px;color:var(--bright);margin-bottom:6px;">STANDBY</div>
+    <div style="font-size:11px;letter-spacing:2px;color:var(--text-dim);margin-top:16px;">WAITING FOR HOST TO CONFIGURE AND LAUNCH...</div>
+    <div id="waiting-dots" style="font-size:18px;color:var(--accent);margin-top:18px;letter-spacing:8px;">· · ·</div>
+  </div>
+</div>
+
+<!-- ── OVERLAY: MAIN MENU ─────────────────────────────────── -->
+<div id="menu-overlay" class="hidden">
+  <div id="menu-box">
+    <div id="menu-title-bar">
+      <div id="menu-title">BELT WARS</div>
+      <div id="menu-sub">ASTEROID CIRCUIT SIMULATOR — AI INSTANCE CONFIGURATION</div>
+    </div>
+    <div id="menu-lore">
+      Two ancient intelligences wage an eternal campaign of R&amp;D in the belt.<br>
+      Every run is data. Every collision is a lesson. Configure your proving ground.
+    </div>
+    <div id="menu-settings">
+      <div class="m-section-title">COURSE GENERATION</div>
+      <div class="seed-row">
+        <label>COURSE SEED</label>
+        <input type="number" id="mn-seed" value="42" min="1" max="999999">
+        <button id="btn-rand-seed">⟳ RANDOM</button>
+      </div>
+      <div class="menu-row">
+        <label>ROCK COUNT</label>
+        <input type="range" id="mn-count" min="10" max="150" value="80">
+        <span class="menu-val" id="mv-count">80</span>
+      </div>
+      <div class="m-section-title" style="margin-top:14px;">ROCK PROPERTIES</div>
+      <div class="menu-row">
+        <label>MIN ROCK SIZE (km)</label>
+        <input type="range" id="mn-minr" min="0.5" max="4" step="0.5" value="1.5">
+        <span class="menu-val" id="mv-minr">1.5 km</span>
+      </div>
+      <div class="menu-row">
+        <label>MAX ROCK SIZE (km)</label>
+        <input type="range" id="mn-maxr" min="3" max="15" step="0.5" value="7">
+        <span class="menu-val" id="mv-maxr">7.0 km</span>
+      </div>
+      <div class="menu-row">
+        <label>MIN GAP BETWEEN ROCKS</label>
+        <input type="range" id="mn-gap" min="0.2" max="5" step="0.1" value="1">
+        <span class="menu-val" id="mv-gap">1.0 km</span>
+      </div>
+      <div class="m-section-title" style="margin-top:14px;">SAFETY ZONES</div>
+      <div class="menu-row">
+        <label>BEACON CLEARANCE (km)</label>
+        <input type="range" id="mn-bclear" min="6" max="30" step="1" value="14">
+        <span class="menu-val" id="mv-bclear">14 km</span>
+      </div>
+      <div class="menu-row">
+        <label>START CLEARANCE (km)</label>
+        <input type="range" id="mn-sclear" min="4" max="20" step="1" value="10">
+        <span class="menu-val" id="mv-sclear">10 km</span>
+      </div>
+    </div>
+    <div id="menu-footer">
+      <button id="btn-launch">▶ LAUNCH MISSION</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── VIEWPORT: TACTICAL DISPLAY ───────────────────────── -->
+<div id="main">
+  <div id="viewport">
+    <canvas id="main-canvas"></canvas>
+
+    <!-- Display toggle panel — sits over viewport top-left -->
+    <div id="overlay-toggle">
+      <div id="overlay-toggle-header">DISPLAY <span id="ov-arrow">▼</span></div>
+      <div id="overlay-items">
+        <div class="ov-item" data-key="grid">    <span class="ov-check on">✓</span> GRID</div>
+        <div class="ov-item" data-key="rings">   <span class="ov-check on">✓</span> RANGE RINGS</div>
+        <div class="ov-item" data-key="beacons"> <span class="ov-check on">✓</span> BEACONS</div>
+        <div class="ov-item" data-key="rocks">   <span class="ov-check on">✓</span> ROCKS</div>
+        <div class="ov-item" data-key="bounds">  <span class="ov-check on">✓</span> ARENA BOUNDS</div>
+        <div class="ov-item" data-key="predict"> <span class="ov-check on">✓</span> PREDICTION</div>
+        <div class="ov-item" data-key="heading"> <span class="ov-check on">✓</span> HEADING TICKS</div>
+        <div class="ov-item" data-key="velArrow"><span class="ov-check on">✓</span> VELOCITY ARROW</div>
+        <div class="ov-item" data-key="labels">  <span class="ov-check on">✓</span> LABELS</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── NAV STATUS STRIP ──────────────────────────────────── -->
+<div id="nav-strip">
+  <span class="ns-item">POS X <span id="r-px">0.00</span> km</span>
+  <span class="ns-sep">|</span>
+  <span class="ns-item">POS Y <span id="r-py">0.00</span> km</span>
+  <span class="ns-sep">|</span>
+  <span class="ns-item">SPEED <span id="r-sp">0.000</span> km/s</span>
+  <span class="ns-sep">|</span>
+  <span class="ns-item">HEADING <span id="r-hd">0.0°</span></span>
+  <span class="ns-sep">|</span>
+  <span class="ns-item">ROT RATE <span id="r-av">—</span> °/s</span>
+  <span class="ns-sep">|</span>
+  <span class="ns-item">NEAREST BEACON <span id="r-db">---</span> km</span>
+</div>
+
+<!-- ── COMMAND PANEL ─────────────────────────────────────── -->
+<div id="cmd-panel">
+  <!-- Shown when nothing is selected -->
+  <div id="sel-none-strip">
+    NO COMMAND SELECTED
+    <span class="hint">DRAG ON TRACK TO CREATE · DRAG TO MOVE · DRAG EDGE TO RESIZE · DEL TO REMOVE · DBL-CLICK TO EDIT</span>
+  </div>
+
+  <!-- Shown when a bar is selected -->
+  <div id="sel-controls-strip">
+    <!-- Track / timing info -->
+    <div class="si-block">
+      TRACK: <span id="si-track">—</span><br>
+      T+<span id="si-start">—</span> → T+<span id="si-stop">—</span> &nbsp; (<span id="si-dur">—</span> steps)
+    </div>
+
+    <!-- Thrust controls (hidden for rotate commands) -->
+    <div id="ctrl-thrust" style="display:flex; align-items:center; gap:8px;">
+      <span style="font-size:11px;color:var(--text-dim)">THRUST (N)</span>
+      <input type="range" id="mag-slider" min="1000" max="100000" step="1000" value="50000">
+      <span class="ctrl-val" id="mag-disp">50 kN</span>
+    </div>
+
+    <!-- Thrust derived readouts: impulse and delta-v -->
+    <div id="derived-readouts" style="display:none; font-size:11px; color:var(--text-dim); line-height:1.8; border-left:1px solid var(--grid); padding-left:12px; white-space:nowrap;">
+      IMPULSE: <span id="si-impulse" style="color:var(--bright)">—</span> kN·s<br>
+      Δv: <span id="si-dv" style="color:var(--bright)">—</span> km/s
+    </div>
+
+    <!-- Rotate controls (hidden for thrust commands) -->
+    <div id="ctrl-rotate" style="display:none; align-items:center; gap:8px;">
+      <span style="font-size:11px;color:var(--text-dim);white-space:nowrap;">↺ CCW</span>
+      <!-- Single bidirectional slider: negative = CCW, positive = CW -->
+      <input type="range" id="deg-input" min="-25" max="25" step="1" value="0" style="flex:1;accent-color:var(--warning);height:3px;">
+      <span style="font-size:11px;color:var(--text-dim);white-space:nowrap;">CW ↻</span>
+      <span class="ctrl-val" id="torque-disp" style="min-width:70px;text-align:right;">0 kN·m</span>
+
+      <!-- Rotate derived readouts: angular impulse and delta-omega -->
+      <div id="derived-rot" style="display:none; font-size:11px; color:var(--text-dim); line-height:1.8; border-left:1px solid var(--grid); padding-left:12px; white-space:nowrap;">
+        ANG IMPULSE: <span id="si-ang-impulse" style="color:var(--bright)">—</span> kN·m·s<br>
+        Δω: <span id="si-dav" style="color:var(--bright)">—</span> °/s
+      </div>
+
+      <!-- Hidden buttons kept in DOM for modal compatibility -->
+      <div class="dir-btns" style="display:none">
+        <button class="dir-btn active" id="btn-ccw">↺ CCW</button>
+        <button class="dir-btn"        id="btn-cw" >↻ CW</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Execute and Clear — pinned right via margin-left:auto on .cmd-panel-btns -->
+  <div class="cmd-panel-btns">
+    <button class="btn-exec"  id="btn-exec">▶ EXECUTE TURN</button>
+    <button class="btn-clear" id="btn-clear">CLEAR ALL</button>
+  </div>
+</div>
+
+<!-- ── SEQUENCER ─────────────────────────────────────────── -->
+<div id="sequencer">
+  <div id="seq-header">
+    <span>COMMAND SEQUENCER — DRAG TO PLACE · DRAG BODY TO MOVE · DRAG EDGE TO RESIZE · DEL TO REMOVE</span>
+    <span id="seq-cur">T+—</span>
+  </div>
+  <canvas id="seq-canvas"></canvas>
+</div>
+
+<!-- ── STATUS BAR ────────────────────────────────────────── -->
+<div id="statusbar">SYSTEM READY</div>
+
+<!-- ── OVERLAY: LAP COMPLETE ─────────────────────────────── -->
+<div id="lap-overlay" class="hidden" style="position:fixed;inset:0;z-index:400;background:rgba(0,10,0,0.88);align-items:center;justify-content:center;font-family:'Courier New',monospace;">
+  <div style="border:1px solid var(--accent);background:#000e00;padding:32px 40px;min-width:380px;text-align:center;box-shadow:0 0 60px #00ff8822;">
+    <div style="font-size:11px;letter-spacing:4px;color:var(--text-dim);margin-bottom:10px;">MISSION COMPLETE</div>
+    <div style="font-size:26px;letter-spacing:8px;color:var(--bright);text-shadow:0 0 20px #66ff6666;margin-bottom:6px;">LAP FINISHED</div>
+    <div style="font-size:11px;letter-spacing:2px;color:var(--text-dim);margin-bottom:28px;">ALPHA → BETA → GAMMA → ALPHA</div>
+    <div style="border:1px solid var(--grid);padding:16px;margin-bottom:24px;background:#000a00;">
+      <div style="font-size:11px;color:var(--text-dim);margin-bottom:8px;letter-spacing:2px;">RUN STATISTICS</div>
+      <div style="font-size:14px;color:var(--bright);margin-bottom:4px;">TURNS ELAPSED &nbsp; <span id="lap-turns" style="font-size:22px;color:var(--accent)">—</span></div>
+      <div style="font-size:11px;color:var(--text-dim);">COURSE SEED &nbsp; <span id="lap-seed" style="color:var(--text)">—</span></div>
+    </div>
+    <div style="display:flex;gap:10px;">
+      <button id="btn-retry"    style="flex:1;padding:10px;background:transparent;border:1px solid var(--text);color:var(--text);font-family:inherit;font-size:11px;letter-spacing:3px;cursor:pointer;">↺ RETRY</button>
+      <button id="btn-replay"   style="flex:1;padding:10px;background:transparent;border:1px solid var(--warning);color:var(--warning);font-family:inherit;font-size:11px;letter-spacing:3px;cursor:pointer;">▶ REPLAY</button>
+      <button id="btn-lap-menu" style="flex:1;padding:10px;background:transparent;border:1px solid var(--accent);color:var(--accent);font-family:inherit;font-size:11px;letter-spacing:3px;cursor:pointer;">⬡ MENU</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── OVERLAY: REPLAY CONTROLS ──────────────────────────── -->
+<div id="replay-controls" class="hidden" style="position:fixed;bottom:180px;left:50%;transform:translateX(-50%);z-index:350;font-family:'Courier New',monospace;text-align:center;">
+  <div style="background:#000e00;border:1px solid var(--warning);padding:10px 24px;display:flex;align-items:center;gap:16px;">
+    <span style="font-size:10px;letter-spacing:3px;color:var(--warning)">REPLAY</span>
+    <span id="replay-turn-disp" style="font-size:12px;color:var(--bright);min-width:120px;">TURN — / —</span>
+    <button id="btn-replay-stop" style="padding:5px 14px;background:transparent;border:1px solid var(--danger);color:var(--danger);font-family:inherit;font-size:10px;letter-spacing:2px;cursor:pointer;">■ STOP</button>
+  </div>
+</div>
+
+<!-- ── OVERLAY: CHECKPOINT FLASH ─────────────────────────── -->
+<div id="cp-flash" class="hidden" style="position:fixed;top:80px;left:50%;transform:translateX(-50%);z-index:350;text-align:center;pointer-events:none;font-family:'Courier New',monospace;">
+  <div id="cp-text" style="font-size:18px;letter-spacing:6px;text-shadow:0 0 20px currentColor;"></div>
+</div>
+
+<!-- ── OVERLAY: EDIT MODAL ───────────────────────────────── -->
+<div id="modal-overlay">
+  <div id="modal">
+    <div id="modal-title">EDIT COMMAND</div>
+    <div class="m-row"><label>START (T+)</label><input type="number" id="m-start" min="0" max="99" value="0"></div>
+    <div class="m-row"><label>STOP  (T+)</label><input type="number" id="m-stop"  min="1" max="100" value="50"></div>
+    <div class="m-row" id="m-row-mag"><label>THRUST (N)</label><input type="number" id="m-mag" min="1000" max="100000" step="1000" value="50000"></div>
+    <div class="m-row" id="m-row-deg"><label>TORQUE (kN·m)</label><input type="number" id="m-deg" min="1" max="25" step="1" value="25"></div>
+    <div class="m-row" id="m-row-dir"><label>DIRECTION</label>
+      <div class="m-dir">
+        <button id="m-ccw" class="active">↺ CCW</button>
+        <button id="m-cw">↻ CW</button>
+      </div>
+    </div>
+    <div class="m-btns">
+      <button class="m-btn m-btn-ok"     id="m-ok">APPLY</button>
+      <button class="m-btn m-btn-cancel" id="m-cancel">CANCEL</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════════
+//  BELT WARS — Main Script
+//
+//  Architecture overview:
+//    CONFIG      — all tunable constants in one place
+//    TRACKS      — immutable track definitions for the sequencer
+//    State.*     — all mutable game state in one namespace
+//    UI.*        — all mutable UI state in one namespace
+//    Replay.*    — replay system state
+//    Physics.*   — pure simulation functions (no side effects)
+//    Collision.* — polygon geometry helpers
+//    Render.*    — canvas drawing functions
+//    Sequencer.* — DAW-style timeline rendering and interaction
+//    Lap.*       — checkpoint and lap completion logic
+//    Menu.*      — main menu and settings
+// ═══════════════════════════════════════════════════════════
+
+
+// ── CONFIG ──────────────────────────────────────────────────
+//
+//  All magic numbers live here. Changing a value here changes
+//  it everywhere in the code — no hunting for hardcoded literals.
+//
+const CONFIG = {
+  // Physics time step. One turn = 1 second, divided into 100 steps.
+  // DT = 0.01 means each step is 10ms of simulated time.
+  STEPS:       100,
+  DT:          0.01,
+
+  // Ship physical properties.
+  // MASS in kg. FORCE / MASS = acceleration (m/s² → km/s² at game scale).
+  // MOI (moment of inertia) in kg·m². TORQUE / MOI = angular acceleration.
+  // At 25 kN·m max torque with MOI 50,000: ~28° rotation per full turn.
+  SHIP_MASS:   10000,
+  SHIP_MOI:    50000,
+
+  // Playback speed: ms between each simulated timestep during playback.
+  // Lower = faster. At 36ms, a 100-step turn takes ~3.6 seconds to watch.
+  PLAYBACK_MS: 36,
+
+  // Arena boundary in km. Ship gets a warning past WARN_ZONE.
+  BOUNDS:      500,
+  WARN_ZONE:   450,
+
+  // How close (km) the ship must get to a beacon for it to register.
+  GATE_RADIUS: 13,
+
+  // Viewport zoom limits in pixels-per-km.
+  SCALE_MIN:   10,
+  SCALE_MAX:   2000,
+
+  // Sequencer layout in pixels.
+  SEQ_LABEL_W: 58,    // width of track label column
+  TRACK_H:     26,    // height of each track row
+  RULER_H:     18,    // height of the ruler at the bottom
+  HANDLE_W:    7,     // hit zone width for resize handles
+};
+
+// ── TRACK DEFINITIONS ────────────────────────────────────────
+//
+//  Each track in the sequencer corresponds to one engine.
+//  lx / ly define the thrust direction in the ship's LOCAL space:
+//    lx: 1 = forward (MAIN), -1 = backward (RETRO)
+//    ly: -1 = left (PORT),    1 = right (STBD)
+//  The world-space direction is calculated each timestep using
+//  the ship's current angle, so turns affect thrust direction.
+//
+const TRACKS = [
+  { id:'main',   label:'MAIN',   type:'thrust', lx: 1, ly: 0, color:'#082808', bright:'#33aa33' },
+  { id:'retro',  label:'RETRO',  type:'thrust', lx:-1, ly: 0, color:'#062006', bright:'#28882a' },
+  { id:'port',   label:'PORT',   type:'thrust', lx: 0, ly:-1, color:'#073010', bright:'#2a9944' },
+  { id:'stbd',   label:'STBD',   type:'thrust', lx: 0, ly: 1, color:'#062810', bright:'#228833' },
+  { id:'rotate', label:'ROTATE', type:'rotate',              color:'#1e1a00', bright:'#aaaa22' },
+];
+
+// Height of the full sequencer canvas
+const SEQ_H = TRACKS.length * CONFIG.TRACK_H + CONFIG.RULER_H;
+
+// ── BEACON DEFINITIONS ───────────────────────────────────────
+//
+//  The three circuit waypoints. Arranged as an equilateral-ish
+//  triangle with ALPHA at the top. The ship starts at ALPHA.
+//
+// ── START POSITIONS ──────────────────────────────────────────
+//
+//  Both ships start near ALPHA beacon (0, 80), offset perpendicular
+//  to the ALPHA→BETA heading so they're side by side at launch.
+//
+//  ALPHA→BETA vector: (70, -120)
+//  Facing angle: atan2(70, 120) ≈ 0.528 rad clockwise from north.
+//  Perpendicular (left/right of that heading) for side-by-side placement.
+//
+(function() {
+  const toBeta = { x: 70 - 0, y: -40 - 80 };              // vector ALPHA→BETA
+  const dist   = Math.hypot(toBeta.x, toBeta.y);
+  const fwd    = { x: toBeta.x/dist, y: toBeta.y/dist };   // unit forward vector
+  const perp   = { x: -fwd.y, y: fwd.x };                  // perpendicular (left)
+
+  // Facing angle so BETA appears directly above the ship on screen.
+  // Derived from w2s: for a world point (dx,dy) to appear at screen-top,
+  // we need 70*sin(a) + 120*cos(a) = 0 → a = -atan2(-toBeta.y, toBeta.x)
+  const facingAngle = -Math.atan2(-toBeta.y, toBeta.x);
+
+  const OFFSET = 8; // km between ships
+
+  CONFIG.START_ALPHA = {
+    pos:    { x:  perp.x * OFFSET/2, y: 80 + perp.y * OFFSET/2 },
+    angle:  facingAngle,
+  };
+  CONFIG.START_BETA = {
+    pos:    { x: -perp.x * OFFSET/2, y: 80 - perp.y * OFFSET/2 },
+    angle:  facingAngle,
+  };
+})();
+
+// Helper — returns the correct start state for a given slot
+function startStateForSlot(slot) {
+  const s = slot === 'beta' ? CONFIG.START_BETA : CONFIG.START_ALPHA;
+  return { pos:{...s.pos}, vel:{x:0,y:0}, angle:s.angle, angVel:0 };
+}
+
+const BEACONS = [
+  { x:   0, y:  80, label:'ALPHA', color:'#00ff88', dim:'#1a6a4a' },
+  { x:  70, y: -40, label:'BETA',  color:'#00aaff', dim:'#1a3a6a' },
+  { x: -70, y: -40, label:'GAMMA', color:'#ffaa00', dim:'#6a4a1a' },
+];
+
+// Order checkpoints must be visited: BETA (1) → GAMMA (2) → ALPHA (0)
+const CHECKPOINT_ORDER = [1, 2, 0];
+
+
+// ── STATE ────────────────────────────────────────────────────
+//
+//  All mutable game state lives in this object.
+//  This is the "source of truth" for what is happening in the simulation.
+//
+//  Separating state from UI state makes it easier to reason about
+//  what is "real" (ship position, velocity) vs. what is "display"
+//  (pan offset, selected command).
+//
+const State = {
+  // The player's ship. All values are in SI-adjacent units:
+  //   pos: {x, y} in km
+  //   vel: {x, y} in km/s
+  //   angle: radians (0 = pointing up / north)
+  //   angVel: radians/second (positive = CCW, negative = CW)
+  // Ship starts at the position for this player's slot (alpha/beta).
+  // Slot is determined after lobby — default to alpha for solo mode.
+  ship: { pos:{x:0,y:80}, vel:{x:0,y:0}, angle:0, angVel:0 },
+
+  // Opponent ship — only populated in multiplayer.
+  // Driven by their trail during playback, static between turns.
+  opponent: null,  // null in solo | { pos, vel, angle, angVel } in multi
+
+  // The command queue for the current turn being planned.
+  // Each entry is a command object: { type, track, startStep, stopStep, ... }
+  commands: [],
+
+  // Rocks on the current course. Generated once per mission launch.
+  rocks: [],
+
+  // Course generation parameters — overwritten from the menu before launch.
+  courseConfig: {
+    seed:       42,
+    count:      80,
+    minR:       1.5,
+    maxR:       7,
+    beaconClear:14,
+    shipClear:  10,
+    gap:        1,
+  },
+
+  // Lap tracking
+  nextCheckIdx: 0,        // index into CHECKPOINT_ORDER for next gate
+  lapTurns:     0,        // turns executed this lap
+  lapComplete:  false,    // true once all checkpoints passed
+  turnNum:      1,        // absolute turn counter
+
+  // Replay log — an array of TurnRecord objects, one per executed turn.
+  // Each TurnRecord captures everything needed to replay that turn:
+  // { turn, startPos, startVel, startAngle, startAngVel, commands, trail, checkpoints }
+  // This is also the blueprint for the multiplayer packet format.
+  replayLog: [],
+};
+
+
+// ── UI STATE ─────────────────────────────────────────────────
+//
+//  Everything that affects what the player sees but is NOT part
+//  of the simulation itself. Pan offset, selected command, playback.
+//
+const UI = {
+  // Viewport pan offset in screen pixels. (0,0) = ship centered.
+  panOffset: { x:0, y:0 },
+  panDrag:   { active:false, startX:0, startY:0, ox:0, oy:0 },
+
+  // Current zoom level in pixels-per-km.
+  scale: 55,
+
+  // Currently selected sequencer bar (null if nothing selected).
+  selCmd: null,
+
+  // Playback state — used during turn execution and replay.
+  playing:     false,
+  pbPositions: [],   // array of trail snapshots for current playback
+  pbStep:      0,    // which step we're currently rendering
+  pbTimer:     null, // setInterval handle — always clear before reassigning
+
+  // Sequencer drag state — used while the player drags a bar.
+  drag: {
+    active:    false,
+    type:      null,   // 'create' | 'move' | 'resize-l' | 'resize-r'
+    cmd:       null,   // the command being dragged
+    startX:    0,      // mouse X at drag start
+    origStart: 0,      // command.startStep at drag start (for delta calculation)
+    origStop:  0,      // command.stopStep at drag start
+  },
+
+  // Prediction dots — clickable circles drawn on the prediction path.
+  // Rebuilt each frame. Not persisted. Format: [{sx, sy, step}]
+  predDots: [],
+
+  // Opponent playback trail — populated during multiplayer turn resolution.
+  // Drives opponent ship rendering during the simultaneous playback phase.
+  oppTrail: [],
+
+  // Which viewport overlays are currently visible.
+  overlays: {
+    grid: true, rings: true, beacons: true, rocks: true,
+    bounds: true, predict: true, heading: true, velArrow: true, labels: true,
+  },
+
+  // Running command ID counter — gives each command a unique ID.
+  cmdIdCounter: 0,
+  nextCmdId() { return ++this.cmdIdCounter; },
+};
+
+
+// ── REPLAY STATE ─────────────────────────────────────────────
+//
+//  Separate from UI.playing because replay is a distinct mode —
+//  it drives playback but also advances through multiple turns.
+//
+const Replay = {
+  active:   false,
+  turnIdx:  0,      // which entry in State.replayLog we're playing
+  timer:    null,   // setInterval handle
+};
+
+
+// ── CANVAS REFERENCES ────────────────────────────────────────
+//
+//  Grabbed once at startup. These never change.
+//  mc   = main tactical display canvas
+//  seqC = sequencer timeline canvas
+//
+const mc   = document.getElementById('main-canvas');
+const mctx = mc.getContext('2d');
+const seqC = document.getElementById('seq-canvas');
+const sqx  = seqC.getContext('2d');
+
+
+// ── COORDINATE TRANSFORM ─────────────────────────────────────
+//
+//  Converts a world position (km) to a screen position (px).
+//
+//  The ship is always at screen center + pan offset.
+//  Everything else is drawn relative to the ship by subtracting
+//  the ship's world position, then rotating by the ship's angle
+//  so that "up" on screen always means "forward" for the ship.
+//
+//  The rotation matrix used here:
+//    screen_x =  (dx * sin(a) - dy * cos(a)) * scale
+//    screen_y = -(dx * cos(a) + dy * sin(a)) * scale
+//  ...where a = ship angle, dx/dy = world delta from ship position.
+//
+function w2s(wx, wy) {
+  // Get current draw position — either playback trail position or live ship
+  const dp = currentDrawPos();
+  const a  = dp.angle || 0;
+  const dx = wx - dp.x;
+  const dy = wy - dp.y;
+  return {
+    x: mc.width /2 + ( dx*Math.sin(a) - dy*Math.cos(a)) * UI.scale + UI.panOffset.x,
+    y: mc.height/2 - ( dx*Math.cos(a) + dy*Math.sin(a)) * UI.scale + UI.panOffset.y,
+  };
+}
+
+// Returns the ship's position+angle to use for drawing this frame.
+// During playback this follows the trail; otherwise uses live State.ship.
+function currentDrawPos() {
+  if (UI.playing && UI.pbPositions.length > 0) {
+    return UI.pbPositions[Math.min(UI.pbStep, UI.pbPositions.length - 1)];
+  }
+  return { x: State.ship.pos.x, y: State.ship.pos.y, angle: State.ship.angle };
+}
+
+
+// ═══════════════════════════════════════════════════════════
+//  THE SIMULATION BOUNDARY
+//
+//  simulate() is the ONE place where physics is computed.
+//  It is a pure function — every dependency is passed in,
+//  nothing is read from global state, nothing is written.
+//
+//  Callers receive a TurnResult object.
+//  ONLY the execute turn handler is permitted to commit
+//  a TurnResult back to State.ship. Everything else
+//  (prediction, replay) reads the result without storing it.
+//
+//  Passing rocks[] as a parameter (rather than reading State.rocks)
+//  means a future moving obstacle field is trivially supported —
+//  just pass a different array each turn.
+// ═══════════════════════════════════════════════════════════
+function simulate(startPos, startVel, startAngle, startAngVel, cmds, startCheckIdx, rocks) {
+  // Local mutable copies — the originals are never modified
+  let pos    = { ...startPos };
+  let vel    = { ...startVel };
+  let angle  = startAngle;
+  let angVel = startAngVel || 0;
+
+  // Which checkpoint index to start tracking from.
+  // Always passed explicitly by the caller — no silent State reads.
+  let checkIdx = startCheckIdx !== undefined ? startCheckIdx : 0;
+
+  // Trail: one entry per timestep. The first entry is the starting state.
+  // Each entry stores position, angle, and velocity so playback can
+  // render the velocity arrow moving live during execution.
+  let trail = [{ x:pos.x, y:pos.y, angle, vx:vel.x, vy:vel.y, angVel }];
+  let checkpointEvents = [];
+
+  for (let s = 0; s < CONFIG.STEPS; s++) {
+
+    // ── Apply commands active at this timestep ──────────────
+    for (const c of cmds) {
+      if (s < c.startStep || s >= c.stopStep) continue;
+
+      if (c.type === 'rotate') {
+        // Angular mechanics: τ = I·α  →  α = τ/I
+        // Torque is stored in kN·m; convert to N·m by * 1000.
+        // angVel accumulates across steps just like linear velocity.
+        const alpha = ((c.torque * 1000) / CONFIG.SHIP_MOI) * (c.cw ? -1 : 1);
+        angVel += alpha * CONFIG.DT;
+
+      } else {
+        // Linear thrust: F = M·a  →  a = F/M
+        // Convert local ship direction (lx,ly) to world direction
+        // using the current angle. This means a rotation command
+        // earlier in the turn affects where thrust points later.
+        const tr = TRACKS.find(t => t.id === c.track);
+        if (!tr) continue;
+        const wx = tr.lx * Math.cos(angle) - tr.ly * Math.sin(angle);
+        const wy = tr.lx * Math.sin(angle) + tr.ly * Math.cos(angle);
+        const accel = c.newtons / CONFIG.SHIP_MASS;
+        vel.x += wx * accel * CONFIG.DT;
+        vel.y += wy * accel * CONFIG.DT;
+      }
+    }
+
+    // ── Integrate velocity → position ───────────────────────
+    // This is Euler integration: simple and sufficient at small DT.
+    angle += angVel * CONFIG.DT;
+    const prevX = pos.x, prevY = pos.y;
+    pos.x += vel.x * CONFIG.DT;
+    pos.y += vel.y * CONFIG.DT;
+
+    // ── Rock collision detection ─────────────────────────────
+    // Two-phase: broad (circle) then narrow (polygon sweep).
+    // See Collision.* functions below for the math.
+    for (const rock of rocks) {
+      // Broad phase: skip if both prev and next positions are far from rock
+      const farNow  = Math.hypot(pos.x  - rock.x, pos.y  - rock.y) > rock.r * 1.5;
+      const farPrev = Math.hypot(prevX  - rock.x, prevY  - rock.y) > rock.r * 1.5;
+      if (farNow && farPrev) continue;
+
+      // Narrow phase A: ship is already inside the polygon (e.g. stuck from prev turn)
+      if (pointInPoly(pos.x, pos.y, rock.verts)) {
+        const pushOut = findNearestEdgePushOut(pos.x, pos.y, rock.verts);
+        pos.x += pushOut.nx * (pushOut.dist + 0.15);
+        pos.y += pushOut.ny * (pushOut.dist + 0.15);
+        vel.x = 0; vel.y = 0;
+        break;
+      }
+
+      // Narrow phase B: movement segment crosses a polygon edge (tunnelling prevention)
+      const hit = sweepPointPoly(prevX, prevY, pos.x, pos.y, rock.verts);
+      if (hit) {
+        pos.x = prevX + hit.t * (pos.x - prevX) + hit.nx * 0.15;
+        pos.y = prevY + hit.t * (pos.y - prevY) + hit.ny * 0.15;
+        vel.x = 0; vel.y = 0;
+        break;
+      }
+    }
+
+    // Record this timestep's state in the trail
+    trail.push({ x:pos.x, y:pos.y, angle, vx:vel.x, vy:vel.y, angVel });
+
+    // ── Checkpoint detection ─────────────────────────────────
+    // Check if the ship entered the gate radius of the next checkpoint.
+    if (checkIdx < CHECKPOINT_ORDER.length) {
+      const b = BEACONS[CHECKPOINT_ORDER[checkIdx]];
+      if (Math.hypot(pos.x - b.x, pos.y - b.y) < CONFIG.GATE_RADIUS) {
+        checkpointEvents.push({
+          step: trail.length - 1,
+          beaconIdx: CHECKPOINT_ORDER[checkIdx],
+          label: b.label,
+        });
+        checkIdx++;
+      }
+    }
+  }
+
+  return {
+    trail,
+    finalPos:    { ...pos },
+    finalVel:    { ...vel },
+    finalAngle:  angle,
+    finalAngVel: angVel,
+    checkpointEvents,
+    finalCheckIdx: checkIdx,
+  };
+}
+
+
+// ═══════════════════════════════════════════════════════════
+//  COLLISION GEOMETRY
+//
+//  These are pure mathematical functions.
+//  They operate only on the data passed to them —
+//  no global state reads or writes.
+// ═══════════════════════════════════════════════════════════
+
+// Seeded pseudo-random — deterministic from (seed, index).
+// Used to generate rock shapes that look the same every time.
+function seededRand(seed, i) {
+  const x = Math.sin(seed * 127.1 + i * 311.7) * 43758.5453;
+  return x - Math.floor(x);
+}
+
+// Build the polygon vertices for a rock in world space.
+// 11 points around a circle, each jittered outward 55–115% of the radius.
+// The jitter is seeded so the same rock always has the same shape.
+function buildRockVerts(rock) {
+  const pts = 11, verts = [];
+  for (let i = 0; i < pts; i++) {
+    const a      = (i / pts) * Math.PI * 2;
+    const jitter = 0.55 + seededRand(rock.seed, i) * 0.6;
+    verts.push({
+      x: rock.x + Math.cos(a) * rock.r * jitter,
+      y: rock.y + Math.sin(a) * rock.r * jitter,
+    });
+  }
+  return verts;
+}
+
+// Segment intersection: does segment AB intersect segment CD?
+// Returns t in [0,1] (how far along AB the intersection is), or null.
+// Used by sweepPointPoly to test the ship's movement path against each edge.
+function segSegT(ax, ay, bx, by, cx, cy, dx, dy) {
+  const abx = bx-ax, aby = by-ay;
+  const cdx = dx-cx, cdy = dy-cy;
+  const denom = abx*cdy - aby*cdx;
+  if (Math.abs(denom) < 1e-12) return null; // parallel lines
+  const t = ((cx-ax)*cdy - (cy-ay)*cdx) / denom;
+  const u = ((cx-ax)*aby - (cy-ay)*abx) / denom;
+  return (t >= 0 && t <= 1 && u >= 0 && u <= 1) ? t : null;
+}
+
+// Point-in-polygon test using ray casting.
+// Casts a ray rightward from (px,py) and counts edge crossings.
+// Odd count = inside; even count = outside.
+function pointInPoly(px, py, verts) {
+  let inside = false;
+  for (let i = 0, j = verts.length-1; i < verts.length; j = i++) {
+    const xi = verts[i].x, yi = verts[i].y;
+    const xj = verts[j].x, yj = verts[j].y;
+    if ((yi > py) !== (yj > py) && px < (xj-xi)*(py-yi)/(yj-yi)+xi)
+      inside = !inside;
+  }
+  return inside;
+}
+
+// When the ship is inside a polygon (stuck), find the nearest edge
+// and return a normal vector pointing outward, plus the distance to it.
+// Used to push the ship back out to the surface.
+function findNearestEdgePushOut(px, py, verts) {
+  const cx = verts.reduce((s,v) => s+v.x, 0) / verts.length;
+  const cy = verts.reduce((s,v) => s+v.y, 0) / verts.length;
+  let bestDist = Infinity, bestNx = 1, bestNy = 0;
+  for (let i = 0; i < verts.length; i++) {
+    const a = verts[i], b = verts[(i+1) % verts.length];
+    const abx = b.x-a.x, aby = b.y-a.y;
+    const t   = Math.max(0, Math.min(1, ((px-a.x)*abx + (py-a.y)*aby) / (abx*abx + aby*aby)));
+    const ex  = a.x + t*abx - px;
+    const ey  = a.y + t*aby - py;
+    const d   = Math.hypot(ex, ey);
+    if (d < bestDist) {
+      bestDist = d;
+      const len = Math.hypot(abx, aby);
+      let enx = -aby/len, eny = abx/len;
+      // Ensure normal points outward (away from polygon center)
+      if (enx*(a.x+b.x)/2 - cx + eny*(a.y+b.y)/2 - cy < 0) { enx=-enx; eny=-eny; }
+      bestNx = enx; bestNy = eny;
+    }
+  }
+  return { nx: bestNx, ny: bestNy, dist: bestDist };
+}
+
+// Sweep a point from (px,py) to (nx2,ny2) against all polygon edges.
+// Returns the earliest intersection { t, nx, ny } or null.
+// This catches fast-moving objects that would tunnel through thin polygons.
+function sweepPointPoly(px, py, nx2, ny2, verts) {
+  let hit = null;
+  const cx = verts.reduce((s,v) => s+v.x, 0) / verts.length;
+  const cy = verts.reduce((s,v) => s+v.y, 0) / verts.length;
+  for (let i = 0; i < verts.length; i++) {
+    const a = verts[i], b = verts[(i+1) % verts.length];
+    const t = segSegT(px, py, nx2, ny2, a.x, a.y, b.x, b.y);
+    if (t !== null && (hit === null || t < hit.t)) {
+      const ex = b.x-a.x, ey = b.y-a.y, len = Math.hypot(ex, ey);
+      let enx = -ey/len, eny = ex/len;
+      if (enx*(a.x+b.x)/2 - cx + eny*(a.y+b.y)/2 - cy < 0) { enx=-enx; eny=-eny; }
+      hit = { t, nx: enx, ny: eny };
+    }
+  }
+  return hit;
+}
+
+
+// ═══════════════════════════════════════════════════════════
+//  ROCK GENERATION
+//
+//  Procedural placement using a seeded RNG.
+//  Rocks are generated once at mission launch and stored in State.rocks.
+//  Each rock gets its collision polygon built immediately — the same
+//  vertices are used for both rendering and physics.
+// ═══════════════════════════════════════════════════════════
+
+// Mulberry32 — a fast, high-quality 32-bit seeded RNG.
+// Returns a function that produces numbers in [0, 1).
+function makeRNG(seed) {
+  let s = seed >>> 0;
+  return function() {
+    s = Math.imul(s ^ (s >>> 15), s | 1);
+    s ^= s + Math.imul(s ^ (s >>> 7), s | 61);
+    return ((s ^ (s >>> 14)) >>> 0) / 0xffffffff;
+  };
+}
+
+function generateRocks(cfg) {
+  const rng      = makeRNG(cfg.seed);
+  const placed   = [];
+  const maxTries = cfg.count * 30;
+
+  // Bounding box that loosely wraps the triangle formed by the three beacons
+  const xMin = -88, xMax = 88, yMin = -58, yMax = 88;
+
+  for (let attempt = 0; attempt < maxTries && placed.length < cfg.count; attempt++) {
+    const x = xMin + rng() * (xMax - xMin);
+    const y = yMin + rng() * (yMax - yMin);
+    const r = cfg.minR + rng() * (cfg.maxR - cfg.minR);
+    let valid = true;
+
+    // Reject if too close to any beacon
+    for (const b of BEACONS) {
+      if (Math.hypot(x - b.x, y - b.y) < cfg.beaconClear + r) { valid = false; break; }
+    }
+
+    // Reject if too close to either ship start position
+    const startA = CONFIG.START_ALPHA?.pos || {x:0, y:80};
+    const startB = CONFIG.START_BETA?.pos  || {x:0, y:80};
+    if (valid && Math.hypot(x - startA.x, y - startA.y) < cfg.shipClear + r) valid = false;
+    if (valid && Math.hypot(x - startB.x, y - startB.y) < cfg.shipClear + r) valid = false;
+
+    // Reject if overlapping another rock (enforce minimum surface gap)
+    if (valid) {
+      for (const o of placed) {
+        if (Math.hypot(x - o.x, y - o.y) < r + o.r + cfg.gap) { valid = false; break; }
+      }
+    }
+
+    if (valid) {
+      const rock = { x, y, r, vr: r, seed: placed.length + 1, verts: [] };
+      rock.verts = buildRockVerts(rock);
+      placed.push(rock);
+    }
+  }
+  return placed;
+}
+
+
+// ═══════════════════════════════════════════════════════════
+//  RENDERING
+//
+//  All draw functions write to the main canvas (mc / mctx).
+//  They read from State and UI but never write to them.
+//  The main render loop calls render() every animation frame.
+// ═══════════════════════════════════════════════════════════
+
+function render() {
+  const W = mc.width, H = mc.height;
+  mctx.clearRect(0, 0, W, H);
+  mctx.fillStyle = '#000a00';
+  mctx.fillRect(0, 0, W, H);
+
+  drawGrid(W, H);
+  if (UI.overlays.rocks)    drawRocks();
+  if (UI.overlays.beacons)  drawBeacons();
+  if (UI.overlays.bounds)   drawBounds();
+  if (!UI.playing && UI.overlays.predict) drawPrediction();
+  drawShip();
+  updateReadouts();
+  drawPanIndicator(W, H);
+}
+
+// Background grid and range rings — all centered on the ship's screen position.
+function drawGrid(W, H) {
+  const shipX = W/2 + UI.panOffset.x;
+  const shipY = H/2 + UI.panOffset.y;
+
+  if (UI.overlays.grid) {
+    mctx.strokeStyle = '#001600'; mctx.lineWidth = 1;
+    // Offset grid lines so they always pass through the ship position
+    const ox = shipX % UI.scale, oy = shipY % UI.scale;
+    for (let x = ox; x < W; x += UI.scale) { mctx.beginPath(); mctx.moveTo(x,0); mctx.lineTo(x,H); mctx.stroke(); }
+    for (let y = oy; y < H; y += UI.scale) { mctx.beginPath(); mctx.moveTo(0,y); mctx.lineTo(W,y); mctx.stroke(); }
+    // Brighter axis lines through ship center
+    mctx.strokeStyle = '#002400';
+    mctx.beginPath(); mctx.moveTo(shipX,0); mctx.lineTo(shipX,H); mctx.stroke();
+    mctx.beginPath(); mctx.moveTo(0,shipY); mctx.lineTo(W,shipY); mctx.stroke();
+  }
+
+  if (UI.overlays.rings) {
+    mctx.setLineDash([2,6]); mctx.strokeStyle = '#001e00';
+    // Range rings at 3, 6, 9, 12 km
+    [3,6,9,12].forEach(r => {
+      mctx.beginPath(); mctx.arc(shipX, shipY, r * UI.scale, 0, Math.PI*2); mctx.stroke();
+    });
+    mctx.setLineDash([]);
+  }
+}
+
+// Arena boundary — a dashed rectangle at ±500km in world space.
+// Turns red and flashes the screen when the ship gets close.
+function drawBounds() {
+  const corners = [[-CONFIG.BOUNDS,-CONFIG.BOUNDS],[CONFIG.BOUNDS,-CONFIG.BOUNDS],[CONFIG.BOUNDS,CONFIG.BOUNDS],[-CONFIG.BOUNDS,CONFIG.BOUNDS]];
+  const dp = currentDrawPos();
+  const nearEdge = Math.max(Math.abs(dp.x), Math.abs(dp.y)) > CONFIG.WARN_ZONE;
+  mctx.setLineDash([6,8]);
+  mctx.strokeStyle = nearEdge ? '#ff330055' : '#002a00';
+  mctx.lineWidth   = nearEdge ? 1.5 : 1;
+  mctx.beginPath();
+  corners.forEach(([wx,wy],i) => { const s=w2s(wx,wy); i===0?mctx.moveTo(s.x,s.y):mctx.lineTo(s.x,s.y); });
+  mctx.closePath(); mctx.stroke(); mctx.setLineDash([]);
+  mctx.fillStyle = nearEdge ? '#ff330044' : '#001e00';
+  mctx.font = '8px Courier New';
+  const tl = w2s(-CONFIG.BOUNDS, CONFIG.BOUNDS);
+  mctx.fillText('±500km', tl.x+4, tl.y+12);
+  if (nearEdge) { mctx.fillStyle='rgba(255,51,0,0.06)'; mctx.fillRect(0,0,mc.width,mc.height); }
+}
+
+// Rocks — draw each as its polygon vertices projected to screen space.
+// The visual shape IS the collision shape (same verts array).
+function drawRocks() {
+  State.rocks.forEach(rock => {
+    const sverts = rock.verts.map(v => w2s(v.x, v.y));
+    mctx.beginPath();
+    sverts.forEach((v,i) => i===0 ? mctx.moveTo(v.x,v.y) : mctx.lineTo(v.x,v.y));
+    mctx.closePath();
+    mctx.fillStyle = '#111a0a'; mctx.fill();
+    mctx.strokeStyle = '#2a4a1a'; mctx.lineWidth = 1.5; mctx.stroke();
+  });
+}
+
+// Beacons — each has a pulsing ring, crosshairs, and a label.
+// The NEXT checkpoint gets a larger dashed gate ring so the player
+// can see exactly where they need to fly through.
+// Off-screen beacons get a "Dorito" (triangle) pinned to the viewport edge.
+function drawBeacons() {
+  const t = Date.now() / 1000;
+  const W = mc.width, H = mc.height;
+  const MARGIN = 24;
+
+  BEACONS.forEach(b => {
+    const s = w2s(b.x, b.y);
+    const onScreen = s.x > -20 && s.x < W+20 && s.y > -20 && s.y < H+20;
+
+    if (onScreen) {
+      const pulse  = 0.5 + 0.5 * Math.sin(t * 1.8);
+      const isNext = !State.lapComplete && CHECKPOINT_ORDER[State.nextCheckIdx] === BEACONS.indexOf(b);
+
+      mctx.beginPath(); mctx.arc(s.x,s.y,10+pulse*7,0,Math.PI*2);
+      mctx.strokeStyle=`${b.color}22`; mctx.lineWidth=1; mctx.stroke();
+      mctx.beginPath(); mctx.arc(s.x,s.y,6,0,Math.PI*2);
+      mctx.strokeStyle=b.color; mctx.lineWidth=isNext?2.5:1.5; mctx.stroke();
+      mctx.beginPath(); mctx.arc(s.x,s.y,2.5,0,Math.PI*2); mctx.fillStyle=b.color; mctx.fill();
+
+      if (isNext) {
+        // Dashed gate ring at GATE_RADIUS km
+        const gr = CONFIG.GATE_RADIUS * UI.scale;
+        mctx.beginPath(); mctx.arc(s.x,s.y,gr,0,Math.PI*2);
+        mctx.strokeStyle=b.color+'55'; mctx.lineWidth=1.5;
+        mctx.setLineDash([6,6]); mctx.stroke(); mctx.setLineDash([]);
+        mctx.fillStyle=b.color; mctx.font='9px Courier New';
+        mctx.fillText('▶ NEXT', s.x+gr+4, s.y-5);
+      }
+
+      mctx.strokeStyle=b.color+'44'; mctx.lineWidth=1;
+      mctx.beginPath(); mctx.moveTo(s.x-14,s.y); mctx.lineTo(s.x+14,s.y); mctx.stroke();
+      mctx.beginPath(); mctx.moveTo(s.x,s.y-14); mctx.lineTo(s.x,s.y+14); mctx.stroke();
+      mctx.fillStyle=b.color; mctx.font='9px Courier New';
+      mctx.fillText(`◈ BEACON ${b.label}`, s.x+16, s.y-5);
+      mctx.fillStyle=b.dim;
+      mctx.fillText(`[${b.x.toFixed(0)}, ${b.y.toFixed(0)}]`, s.x+16, s.y+7);
+
+    } else {
+      // Off-screen: ray-cast from screen center to beacon, clamp to viewport edge
+      const ocx=W/2, ocy=H/2;
+      const rdx=s.x-ocx, rdy=s.y-ocy;
+      const angle=Math.atan2(rdy,rdx);
+      let tEdge=Infinity;
+      if (rdx>0)  tEdge=Math.min(tEdge,(W-MARGIN-ocx)/rdx);
+      else if(rdx<0) tEdge=Math.min(tEdge,(MARGIN-ocx)/rdx);
+      if (rdy>0)  tEdge=Math.min(tEdge,(H-MARGIN-ocy)/rdy);
+      else if(rdy<0) tEdge=Math.min(tEdge,(MARGIN-ocy)/rdy);
+      const ex=ocx+rdx*tEdge, ey=ocy+rdy*tEdge;
+
+      const dp   = currentDrawPos();
+      const dist = Math.hypot(dp.x-b.x, dp.y-b.y);
+
+      mctx.save(); mctx.translate(ex,ey); mctx.rotate(angle);
+      mctx.beginPath(); mctx.moveTo(9,0); mctx.lineTo(-9,-5.85); mctx.lineTo(-9,5.85);
+      mctx.closePath(); mctx.fillStyle=b.color+'cc'; mctx.fill(); mctx.restore();
+
+      mctx.fillStyle=b.color; mctx.font='8px Courier New';
+      const lx=ex+Math.cos(angle)*16, ly=ey+Math.sin(angle)*16;
+      const labelX=Math.max(4,Math.min(W-80,lx-(lx>W/2?70:0)));
+      const labelY=Math.max(12,Math.min(H-4,ly));
+      mctx.fillText(`${b.label} ${dist.toFixed(0)}km`, labelX, labelY);
+    }
+  });
+}
+
+// Prediction path — shows where the ship will go if the current
+// command queue is executed. Drawn as dots every 10 steps plus
+// blue heading ticks showing the ship's rotation at each point.
+// Also shows the T+100 endpoint and a dashed velocity arrow there.
+function drawPrediction() {
+  const result = simulate(State.ship.pos, State.ship.vel, State.ship.angle, State.ship.angVel, State.commands, State.nextCheckIdx, State.rocks);
+  const trail  = result.trail;
+  if (trail.length < 2) return;
+  UI.predDots = [];
+
+  trail.forEach((p,i) => {
+    if (i % 10 !== 0 || i === 0) return;
+    const s = w2s(p.x, p.y);
+    const a = 0.15 + (i / trail.length) * 0.5;
+
+    // Dot — gets brighter further into the future
+    mctx.beginPath(); mctx.arc(s.x,s.y,4,0,Math.PI*2);
+    mctx.fillStyle=`rgba(102,255,102,${a})`; mctx.fill();
+
+    // Blue heading tick — shows which way the ship faces at this point.
+    // The angle is relative to the ship's current facing (world rotation handled by w2s).
+    if (UI.overlays.heading) {
+      const relA = p.angle - State.ship.angle;
+      const hdx  = -Math.sin(relA), hdy = -Math.cos(relA);
+      mctx.strokeStyle=`rgba(40,140,255,${0.4+a*0.5})`; mctx.lineWidth=1.5;
+      mctx.beginPath(); mctx.moveTo(s.x,s.y); mctx.lineTo(s.x+hdx*22,s.y+hdy*22); mctx.stroke();
+    }
+
+    UI.predDots.push({ sx:s.x, sy:s.y, step:i });
+  });
+
+  // T+100 endpoint marker
+  const ep=trail[trail.length-1], es=w2s(ep.x,ep.y);
+  mctx.beginPath(); mctx.arc(es.x,es.y,6,0,Math.PI*2);
+  mctx.strokeStyle='#66ff6644'; mctx.lineWidth=1; mctx.stroke();
+  mctx.fillStyle='#33aa3366'; mctx.font='8px Courier New';
+  mctx.fillText('T+100',es.x+9,es.y-5);
+
+  // Dashed velocity arrow at T+100 — shows momentum carried into next turn
+  const fv=result.finalVel, fspd=Math.hypot(fv.x,fv.y);
+  if (fspd>0.001) {
+    const fve=w2s(ep.x+fv.x*0.6,ep.y+fv.y*0.6);
+    mctx.strokeStyle='#ffaa0088'; mctx.lineWidth=1.5; mctx.setLineDash([3,3]);
+    mctx.beginPath(); mctx.moveTo(es.x,es.y); mctx.lineTo(fve.x,fve.y); mctx.stroke();
+    mctx.setLineDash([]);
+    const fa=Math.atan2(-(fve.y-es.y),fve.x-es.x),ah=5;
+    mctx.fillStyle='#ffaa0088';
+    mctx.beginPath(); mctx.moveTo(fve.x,fve.y);
+    mctx.lineTo(fve.x-ah*Math.cos(fa-0.45),fve.y+ah*Math.sin(fa-0.45));
+    mctx.lineTo(fve.x-ah*Math.cos(fa+0.45),fve.y+ah*Math.sin(fa+0.45));
+    mctx.closePath(); mctx.fill();
+    mctx.fillStyle='#ffaa0099'; mctx.font='8px Courier New';
+    mctx.fillText(`${fspd.toFixed(2)} km/s`,fve.x+6,fve.y+3);
+  }
+}
+
+// Ship — always drawn at screen center (+ pan offset).
+// The world rotates around it, not the other way around.
+// During playback, velocity is read from the trail so the
+// amber arrow updates live as burns execute.
+function drawShip() {
+  const dp = currentDrawPos();
+  const sx = mc.width/2  + UI.panOffset.x;
+  const sy = mc.height/2 + UI.panOffset.y;
+
+  // Triangle pointing up — ship facing is always "up"
+  mctx.beginPath();
+  mctx.moveTo(sx,sy-10); mctx.lineTo(sx-7,sy+7*0.8); mctx.lineTo(sx+7,sy+7*0.8);
+  mctx.closePath(); mctx.fillStyle='#002200'; mctx.fill();
+  mctx.strokeStyle='#66ff66'; mctx.lineWidth=1.5; mctx.stroke();
+  mctx.beginPath(); mctx.arc(sx,sy-10,2,0,Math.PI*2); mctx.fillStyle='#00ff88'; mctx.fill();
+
+  // Amber velocity arrow — length proportional to speed, direction in ship-relative space
+  const liveVel = (UI.playing && UI.pbPositions.length > 0)
+    ? { x: dp.vx || State.ship.vel.x, y: dp.vy || State.ship.vel.y }
+    : State.ship.vel;
+  const spd = Math.hypot(liveVel.x, liveVel.y);
+
+  if (UI.overlays.velArrow && spd > 0.001) {
+    const ve  = w2s(dp.x + liveVel.x*0.6, dp.y + liveVel.y*0.6);
+    const va  = Math.atan2(-(ve.y-sy), ve.x-sx);
+    const ah  = 6;
+    mctx.strokeStyle='#ffaa00'; mctx.lineWidth=1.5;
+    mctx.beginPath(); mctx.moveTo(sx,sy); mctx.lineTo(ve.x,ve.y); mctx.stroke();
+    mctx.fillStyle='#ffaa00';
+    mctx.beginPath(); mctx.moveTo(ve.x,ve.y);
+    mctx.lineTo(ve.x-ah*Math.cos(va-0.45),ve.y+ah*Math.sin(va-0.45));
+    mctx.lineTo(ve.x-ah*Math.cos(va+0.45),ve.y+ah*Math.sin(va+0.45));
+    mctx.closePath(); mctx.fill();
+    if (UI.overlays.labels) {
+      const mx=(sx+ve.x)/2, my=(sy+ve.y)/2;
+      mctx.font='9px Courier New';
+      mctx.fillText(`${spd.toFixed(2)} km/s`,mx+5,my-4);
+    }
+  }
+
+  if (UI.overlays.labels) {
+    mctx.fillStyle='#33aa33'; mctx.font='9px Courier New';
+    mctx.fillText('HULL-01',sx+13,sy-4);
+    mctx.fillStyle='#1a5a1a';
+    mctx.fillText(`[${dp.x.toFixed(1)}, ${dp.y.toFixed(1)}]`,sx+13,sy+7);
+  }
+
+  // ── Opponent ship (multiplayer only) ──────────────────────
+  if (State.opponent) {
+    // During playback use the trail position, otherwise use static State.opponent
+    const oppPos = (UI.playing && UI.oppTrail.length > 0)
+      ? UI.oppTrail[Math.min(UI.pbStep, UI.oppTrail.length-1)]
+      : { x: State.opponent.pos.x, y: State.opponent.pos.y,
+          angle: State.opponent.angle };
+
+    const os = w2s(oppPos.x, oppPos.y);
+    const relAngle = (oppPos.angle || 0) - (currentDrawPos().angle || 0);
+    mctx.save();
+    mctx.translate(os.x, os.y);
+    mctx.rotate(-relAngle);
+    mctx.beginPath();
+    mctx.moveTo(0,-10); mctx.lineTo(-7,7*0.8); mctx.lineTo(7,7*0.8);
+    mctx.closePath();
+    mctx.fillStyle='#001a2a'; mctx.fill();
+    mctx.strokeStyle='#00aaff'; mctx.lineWidth=1.5; mctx.stroke();
+    mctx.beginPath(); mctx.arc(0,-10,2,0,Math.PI*2);
+    mctx.fillStyle='#00ccff'; mctx.fill();
+    mctx.restore();
+
+    if (UI.overlays.labels) {
+      mctx.fillStyle='#00aaff'; mctx.font='9px Courier New';
+      mctx.fillText('HULL-02',os.x+13,os.y-4);
+      mctx.fillStyle='#1a3a5a';
+      mctx.fillText(`[${oppPos.x.toFixed(1)}, ${oppPos.y.toFixed(1)}]`,os.x+13,os.y+7);
+    }
+  }
+} // end drawShip
+
+// Pan indicator — shown in bottom-left when the view is offset from the ship.
+// Includes a small arrow pointing back toward the ship's screen position.
+function drawPanIndicator(W, H) {
+  if (UI.panOffset.x === 0 && UI.panOffset.y === 0) return;
+  mctx.fillStyle='#ffaa0088'; mctx.font='9px Courier New';
+  mctx.fillText('VIEW OFFSET — DBL-CLICK TO RECENTER',10,H-10);
+  const ang=Math.atan2(-UI.panOffset.y,-UI.panOffset.x);
+  const cx=12,cy=H-28;
+  mctx.strokeStyle='#ffaa0066'; mctx.lineWidth=1;
+  mctx.beginPath(); mctx.arc(cx,cy,6,0,Math.PI*2); mctx.stroke();
+  mctx.fillStyle='#ffaa00aa';
+  mctx.beginPath();
+  mctx.moveTo(cx+Math.cos(ang)*6,cy+Math.sin(ang)*6);
+  mctx.lineTo(cx+Math.cos(ang+2.4)*4,cy+Math.sin(ang+2.4)*4);
+  mctx.lineTo(cx+Math.cos(ang-2.4)*4,cy+Math.sin(ang-2.4)*4);
+  mctx.closePath(); mctx.fill();
+}
+
+// Update all the nav strip readouts from current state.
+function updateReadouts() {
+  const dp = currentDrawPos();
+  document.getElementById('r-px').textContent = dp.x.toFixed(2);
+  document.getElementById('r-py').textContent = dp.y.toFixed(2);
+
+  // Live velocity — from trail during playback, from ship otherwise
+  const lv = (UI.playing && UI.pbPositions.length > 0)
+    ? { x: dp.vx || State.ship.vel.x, y: dp.vy || State.ship.vel.y }
+    : State.ship.vel;
+  document.getElementById('r-sp').textContent = Math.hypot(lv.x,lv.y).toFixed(3);
+
+  // Heading in degrees 0–360
+  const hd = ((State.ship.angle * 180/Math.PI) % 360 + 360) % 360;
+  document.getElementById('r-hd').textContent = hd.toFixed(1) + '°';
+
+  // Angular velocity — with direction icon instead of sign
+  const lav = (UI.playing && UI.pbPositions.length > 0)
+    ? (UI.pbPositions[Math.min(UI.pbStep, UI.pbPositions.length-1)].angVel || 0)
+    : State.ship.angVel;
+  const lavDeg = lav * 180/Math.PI;
+  document.getElementById('r-av').textContent = Math.abs(lavDeg) < 0.001 ? '—' :
+    (lavDeg < 0 ? '↻ ' : '↺ ') + Math.abs(lavDeg).toFixed(3);
+
+  // Nearest beacon distance
+  let nearestDist=Infinity, nearestLabel='---';
+  BEACONS.forEach(b => {
+    const d=Math.hypot(dp.x-b.x,dp.y-b.y);
+    if (d<nearestDist) { nearestDist=d; nearestLabel=b.label; }
+  });
+  document.getElementById('r-db').textContent = `${nearestDist.toFixed(2)} (${nearestLabel})`;
+
+  // Boundary warning
+  if (Math.max(Math.abs(dp.x),Math.abs(dp.y)) > CONFIG.WARN_ZONE && !UI.playing) {
+    setStatus(`WARNING — APPROACHING ARENA BOUNDARY (${Math.max(Math.abs(dp.x),Math.abs(dp.y)).toFixed(0)} km / ${CONFIG.BOUNDS} km)`);
+  }
+}
+
+
+// ═══════════════════════════════════════════════════════════
+//  SEQUENCER
+//
+//  The DAW-style timeline at the bottom of the screen.
+//  Canvas is drawn by renderSeq().
+//  Mouse interaction creates, moves, and resizes command bars.
+// ═══════════════════════════════════════════════════════════
+
+// Helper conversions between step numbers and pixel X positions
+const drawW = () => seqC.width - CONFIG.SEQ_LABEL_W;
+const s2x   = s => CONFIG.SEQ_LABEL_W + (s / CONFIG.STEPS) * drawW();
+const x2s   = x => Math.round(Math.max(0, Math.min(CONFIG.STEPS, (x - CONFIG.SEQ_LABEL_W) / drawW() * CONFIG.STEPS)));
+const tTop  = i => i * CONFIG.TRACK_H;
+
+function renderSeq() {
+  const W=seqC.width, H=seqC.height;
+  sqx.clearRect(0,0,W,H);
+  sqx.fillStyle='#000a00'; sqx.fillRect(0,0,W,H);
+
+  TRACKS.forEach((tr,i) => {
+    const ty=tTop(i);
+    sqx.fillStyle=i%2===0?'#000e00':'#000c00';
+    sqx.fillRect(CONFIG.SEQ_LABEL_W,ty,W-CONFIG.SEQ_LABEL_W,CONFIG.TRACK_H);
+    sqx.fillStyle='#030f03'; sqx.fillRect(0,ty,CONFIG.SEQ_LABEL_W,CONFIG.TRACK_H);
+    sqx.fillStyle=tr.bright; sqx.font='9px Courier New';
+    sqx.fillText(tr.label,6,ty+CONFIG.TRACK_H/2+3.5);
+    sqx.strokeStyle='#001800'; sqx.lineWidth=1;
+    sqx.beginPath(); sqx.moveTo(0,ty+CONFIG.TRACK_H); sqx.lineTo(W,ty+CONFIG.TRACK_H); sqx.stroke();
+
+    // Vertical grid lines every 10 steps
+    sqx.strokeStyle='#001500';
+    for (let s=0;s<=CONFIG.STEPS;s+=10) {
+      const x=s2x(s); sqx.beginPath(); sqx.moveTo(x,ty); sqx.lineTo(x,ty+CONFIG.TRACK_H); sqx.stroke();
+    }
+
+    // Draw command bars for this track
+    State.commands.filter(c=>c.track===tr.id).forEach(c => {
+      const x1=s2x(c.startStep), x2=s2x(c.stopStep);
+      const bw=Math.max(3,x2-x1), sel=c===UI.selCmd;
+      sqx.fillStyle=sel?tr.color.replace(/0[68]/g,'18'):tr.color;
+      sqx.fillRect(x1,ty+2,bw,CONFIG.TRACK_H-4);
+      sqx.strokeStyle=sel?tr.bright:tr.bright+'88'; sqx.lineWidth=sel?2:1;
+      sqx.strokeRect(x1+0.5,ty+2.5,bw-1,CONFIG.TRACK_H-5);
+      if (bw>28) {
+        sqx.fillStyle=tr.bright; sqx.font='8px Courier New';
+        const n=c.newtons||50000, dur=(c.stopStep-c.startStep)*CONFIG.DT;
+        const lbl=tr.type==='rotate'
+          ? `${(c.torque||25).toFixed(0)}kN·m ${c.cw?'CW':'CCW'}`
+          : `${(n/1000).toFixed(0)}kN · ${(n*dur/1000).toFixed(1)}kN·s`;
+        sqx.fillText(lbl,x1+5,ty+CONFIG.TRACK_H/2+3.5);
+      }
+      // Resize handle indicators (small filled rectangles at each end)
+      sqx.fillStyle=sel?tr.bright+'cc':tr.bright+'44';
+      sqx.fillRect(x1,ty+4,3,CONFIG.TRACK_H-8);
+      sqx.fillRect(x2-3,ty+4,3,CONFIG.TRACK_H-8);
+    });
+  });
+
+  // Playback cursor — a vertical green line that sweeps through during execution
+  if (UI.playing && UI.pbPositions.length>0) {
+    const px=s2x(UI.pbStep);
+    sqx.strokeStyle='#66ff66aa'; sqx.lineWidth=1.5;
+    sqx.beginPath(); sqx.moveTo(px,0); sqx.lineTo(px,TRACKS.length*CONFIG.TRACK_H); sqx.stroke();
+  }
+
+  // Ruler at the bottom
+  const ry=TRACKS.length*CONFIG.TRACK_H;
+  sqx.fillStyle='#000e00'; sqx.fillRect(CONFIG.SEQ_LABEL_W,ry,W-CONFIG.SEQ_LABEL_W,CONFIG.RULER_H);
+  sqx.fillStyle='#030f03'; sqx.fillRect(0,ry,CONFIG.SEQ_LABEL_W,CONFIG.RULER_H);
+  sqx.font='8px Courier New';
+  for (let s=0;s<=CONFIG.STEPS;s+=10) {
+    const x=s2x(s);
+    sqx.strokeStyle='#002800'; sqx.lineWidth=1;
+    sqx.beginPath(); sqx.moveTo(x,ry); sqx.lineTo(x,ry+5); sqx.stroke();
+    sqx.fillStyle='#1a4a1a';
+    sqx.fillText(s,x-(s===100?8:s>9?4:2),ry+CONFIG.RULER_H-3);
+  }
+}
+
+// Hit test: given a mouse position on the sequencer canvas, what did we click?
+// Returns { type, cmd, ti } or null.
+//   type: 'resize-l' | 'resize-r' | 'move' | 'create'
+//   cmd:  the command bar clicked (null for 'create')
+//   ti:   track index
+function hitTest(x,y) {
+  const ti=Math.floor(y/CONFIG.TRACK_H);
+  if (ti<0||ti>=TRACKS.length) return null;
+  const tr=TRACKS[ti], ty=tTop(ti);
+  if (y<ty+1||y>ty+CONFIG.TRACK_H-1) return null;
+  for (const c of State.commands.filter(c=>c.track===tr.id)) {
+    const x1=s2x(c.startStep), x2=s2x(c.stopStep);
+    if (x>=x1-CONFIG.HANDLE_W&&x<=x1+CONFIG.HANDLE_W) return {type:'resize-l',cmd:c,ti};
+    if (x>=x2-CONFIG.HANDLE_W&&x<=x2+CONFIG.HANDLE_W) return {type:'resize-r',cmd:c,ti};
+    if (x>=x1&&x<=x2)                                  return {type:'move',cmd:c,ti};
+  }
+  if (x>=CONFIG.SEQ_LABEL_W) return {type:'create',cmd:null,ti};
+  return null;
+}
+
+// ── Sequencer mouse events ───────────────────────────────────
+
+// seqC.mousemove: updates cursor style when hovering (no drag active)
+seqC.addEventListener('mousemove', e => {
+  const r=seqC.getBoundingClientRect(), x=e.clientX-r.left, y=e.clientY-r.top;
+  document.getElementById('seq-cur').textContent=`T+${x2s(x)}`;
+  if (!UI.drag.active) {
+    const h=hitTest(x,y);
+    seqC.style.cursor=!h?'default':
+      (h.type==='resize-l'||h.type==='resize-r')?'ew-resize':
+      h.type==='move'?'grab':'crosshair';
+  }
+});
+
+// window.mousemove: tracks drag movement even when cursor leaves the canvas
+window.addEventListener('mousemove', e => {
+  if (!UI.drag.active) return;
+  const r     = seqC.getBoundingClientRect();
+  const x     = e.clientX - r.left;
+  const dStep = Math.round((x - UI.drag.startX) / drawW() * CONFIG.STEPS);
+  document.getElementById('seq-cur').textContent=`T+${x2s(x)}`;
+  const d = UI.drag;
+  if      (d.type==='create')   d.cmd.stopStep  = Math.max(d.cmd.startStep+1, Math.min(CONFIG.STEPS,  x2s(x)));
+  else if (d.type==='move')   { const dur=d.origStop-d.origStart; d.cmd.startStep=Math.max(0,Math.min(CONFIG.STEPS-dur,d.origStart+dStep)); d.cmd.stopStep=d.cmd.startStep+dur; }
+  else if (d.type==='resize-l') d.cmd.startStep = Math.max(0, Math.min(d.origStop-1,  d.origStart+dStep));
+  else if (d.type==='resize-r') d.cmd.stopStep  = Math.max(d.origStart+1, Math.min(CONFIG.STEPS, d.origStop+dStep));
+  renderSeq();
+});
+
+// window.mouseup: always fires on release, even if cursor is off canvas
+window.addEventListener('mouseup', () => {
+  if (!UI.drag.active) return;
+  updateSelInfo();
+  UI.drag.active=false;
+  seqC.style.cursor='crosshair';
+  renderSeq();
+});
+
+// seqC.mousedown: starts a drag or creates a new command bar
+seqC.addEventListener('mousedown', e => {
+  if (UI.playing) return;
+  const r=seqC.getBoundingClientRect(), x=e.clientX-r.left, y=e.clientY-r.top;
+  const h=hitTest(x,y);
+  if (!h) return;
+  UI.drag.active=true; UI.drag.startX=x; UI.drag.type=h.type;
+  if (h.type==='create') {
+    const tr=TRACKS[h.ti], s=x2s(x);
+    const rawTorque=parseFloat(document.getElementById('deg-input').value)||0;
+    const cmd={
+      id:        UI.nextCmdId(),
+      type:      tr.type,
+      track:     tr.id,
+      startStep: s,
+      stopStep:  Math.min(CONFIG.STEPS, s+1),
+      newtons:   parseFloat(document.getElementById('mag-slider').value),
+      torque:    Math.abs(rawTorque)||25,
+      cw:        rawTorque>=0,
+    };
+    State.commands.push(cmd); UI.drag.cmd=cmd;
+  } else {
+    UI.drag.cmd=h.cmd;
+  }
+  UI.drag.origStart=UI.drag.cmd.startStep;
+  UI.drag.origStop =UI.drag.cmd.stopStep;
+  selectCmd(UI.drag.cmd); renderSeq();
+});
+
+seqC.addEventListener('mouseleave', () => {
+  if (!UI.drag.active) document.getElementById('seq-cur').textContent='T+—';
+});
+
+// Double-click a bar to open the numeric edit modal
+seqC.addEventListener('dblclick', e => {
+  if (UI.playing) return;
+  const r=seqC.getBoundingClientRect(), x=e.clientX-r.left, y=e.clientY-r.top;
+  const h=hitTest(x,y);
+  if (h&&h.cmd) openModal(h.cmd);
+});
+
+// Delete key removes selected command
+window.addEventListener('keydown', e => {
+  if ((e.key==='Delete'||e.key==='Backspace') && UI.selCmd && !UI.playing) {
+    State.commands = State.commands.filter(c => c !== UI.selCmd);
+    UI.selCmd = null;
+    updateSelPanel(); renderSeq();
+    setStatus('COMMAND REMOVED');
+  }
+});
+
+
+// ═══════════════════════════════════════════════════════════
+//  COMMAND PANEL — selected command controls
+// ═══════════════════════════════════════════════════════════
+
+function selectCmd(cmd) {
+  UI.selCmd = cmd;
+  updateSelPanel();
+}
+
+// Switch the panel between "nothing selected" and "editing a command"
+function updateSelPanel() {
+  const none = document.getElementById('sel-none-strip');
+  const ctrl = document.getElementById('sel-controls-strip');
+  if (!UI.selCmd) {
+    none.style.display='flex'; ctrl.style.display='none';
+    document.getElementById('derived-readouts').style.display='none';
+    document.getElementById('derived-rot').style.display='none';
+    return;
+  }
+  none.style.display='none'; ctrl.style.display='flex';
+  const tr=TRACKS.find(t=>t.id===UI.selCmd.track);
+  document.getElementById('si-track').textContent=tr?tr.label:UI.selCmd.track.toUpperCase();
+  updateSelInfo();
+
+  const tc=document.getElementById('ctrl-thrust');
+  const rc=document.getElementById('ctrl-rotate');
+  if (UI.selCmd.type==='thrust') {
+    tc.style.display='flex'; rc.style.display='none';
+    document.getElementById('derived-readouts').style.display='none';
+    document.getElementById('derived-rot').style.display='none';
+    const n=UI.selCmd.newtons||50000;
+    document.getElementById('mag-slider').value=n;
+    document.getElementById('mag-disp').textContent=(n/1000).toFixed(0)+' kN';
+  } else {
+    tc.style.display='none'; rc.style.display='flex';
+    const signed=(UI.selCmd.cw?1:-1)*(UI.selCmd.torque||25);
+    document.getElementById('deg-input').value=signed;
+    const disp=document.getElementById('torque-disp');
+    disp.textContent=(UI.selCmd.cw?'↻ ':'↺ ')+(UI.selCmd.torque||25).toFixed(0)+' kN·m';
+    disp.style.color='var(--warning)';
+    document.getElementById('btn-cw').classList.toggle('active',UI.selCmd.cw);
+    document.getElementById('btn-ccw').classList.toggle('active',!UI.selCmd.cw);
+  }
+  updateDerived();
+  updateRotDerived();
+}
+
+// Update timing display and derived readouts for selected command.
+// Called on mouseup (end of drag) to avoid DOM writes every pixel.
+function updateSelInfo() {
+  if (!UI.selCmd) return;
+  document.getElementById('si-start').textContent=UI.selCmd.startStep;
+  document.getElementById('si-stop').textContent =UI.selCmd.stopStep;
+  document.getElementById('si-dur').textContent  =UI.selCmd.stopStep-UI.selCmd.startStep;
+  updateDerived();
+  updateRotDerived();
+}
+
+// Thrust derived readouts: impulse (kN·s) and delta-v (km/s)
+// Impulse = Force × Time. Delta-v = Impulse / Mass.
+function updateDerived() {
+  if (!UI.selCmd||UI.selCmd.type!=='thrust') {
+    document.getElementById('derived-readouts').style.display='none'; return;
+  }
+  const dur    =(UI.selCmd.stopStep-UI.selCmd.startStep)*CONFIG.DT;
+  const n      = UI.selCmd.newtons||50000;
+  const impulse= n*dur;
+  document.getElementById('derived-readouts').style.display='block';
+  document.getElementById('si-impulse').textContent=(impulse/1000).toFixed(1);
+  document.getElementById('si-dv').textContent=(impulse/CONFIG.SHIP_MASS).toFixed(3);
+}
+
+// Rotation derived readouts: angular impulse (kN·m·s) and delta-omega (°/s)
+// Angular impulse = Torque × Time. Delta-omega = Angular impulse / MOI.
+function updateRotDerived() {
+  if (!UI.selCmd||UI.selCmd.type!=='rotate') {
+    document.getElementById('derived-rot').style.display='none'; return;
+  }
+  const dur       =(UI.selCmd.stopStep-UI.selCmd.startStep)*CONFIG.DT;
+  const torqueNm  =(UI.selCmd.torque||0)*1000;
+  const angImpulse= torqueNm*dur;
+  const dOmegaDeg =(angImpulse/CONFIG.SHIP_MOI)*180/Math.PI;
+  const dir       = UI.selCmd.cw?'↻':'↺';
+  document.getElementById('derived-rot').style.display='block';
+  document.getElementById('si-ang-impulse').textContent=(angImpulse/1000).toFixed(2);
+  document.getElementById('si-dav').textContent=dir+' '+dOmegaDeg.toFixed(1);
+}
+
+// ── Command panel controls ───────────────────────────────────
+
+document.getElementById('mag-slider').addEventListener('input',function(){
+  const n=parseFloat(this.value);
+  document.getElementById('mag-disp').textContent=(n/1000).toFixed(0)+' kN';
+  if (UI.selCmd&&UI.selCmd.type==='thrust') { UI.selCmd.newtons=n; updateDerived(); renderSeq(); }
+});
+
+document.getElementById('deg-input').addEventListener('input',function(){
+  const v=parseFloat(this.value)||0;
+  const disp=document.getElementById('torque-disp');
+  if (v===0) { disp.textContent='0 kN·m'; disp.style.color='var(--text-dim)'; }
+  else { disp.textContent=(v>0?'↻ ':'↺ ')+Math.abs(v).toFixed(0)+' kN·m'; disp.style.color='var(--warning)'; }
+  if (UI.selCmd&&UI.selCmd.type==='rotate') { UI.selCmd.torque=Math.abs(v); UI.selCmd.cw=v>=0; updateRotDerived(); renderSeq(); }
+});
+
+document.getElementById('btn-ccw').addEventListener('click',function(){
+  this.classList.add('active'); document.getElementById('btn-cw').classList.remove('active');
+  if (UI.selCmd&&UI.selCmd.type==='rotate') { UI.selCmd.cw=false; renderSeq(); }
+});
+document.getElementById('btn-cw').addEventListener('click',function(){
+  this.classList.add('active'); document.getElementById('btn-ccw').classList.remove('active');
+  if (UI.selCmd&&UI.selCmd.type==='rotate') { UI.selCmd.cw=true; renderSeq(); }
+});
+
+
+// ═══════════════════════════════════════════════════════════
+//  EXECUTE TURN
+//
+//  Branches on Lobby.mode:
+//    solo      → simulate immediately, play back, commit
+//    multi     → write commands to Firebase, wait for opponent,
+//                then resolve both turns simultaneously
+//
+//  The multiplayer path uses Firebase as a message bus.
+//  Each client writes only their own commands. Both clients
+//  independently simulate both command sets — because simulate()
+//  is pure and deterministic, results are identical.
+// ═══════════════════════════════════════════════════════════
+
+// Serialise a command to a plain object safe for Firebase.
+// Firebase can't store undefined values or class instances.
+function serializeCmd(c) {
+  return {
+    type:      c.type,
+    track:     c.track,
+    startStep: c.startStep,
+    stopStep:  c.stopStep,
+    newtons:   c.newtons  || 0,
+    torque:    c.torque   || 0,
+    cw:        c.cw       || false,
+  };
+}
+
+// Run the turn playback for both ships simultaneously.
+// myResult    — simulate() result for this client's ship
+// oppResult   — simulate() result for opponent's ship (null in solo)
+// onComplete  — called when playback finishes
+function playbackTurn(myResult, oppResult, onComplete) {
+  UI.pbPositions = myResult.trail;
+  UI.oppTrail    = oppResult ? oppResult.trail : [];
+  UI.pbStep      = 0;
+  UI.playing     = true;
+
+  if (UI.pbTimer) clearInterval(UI.pbTimer);
+  UI.pbTimer = setInterval(() => {
+    UI.pbStep++; renderSeq();
+
+    myResult.checkpointEvents.forEach(ev => {
+      if (UI.pbStep === ev.step) flashCheckpoint(ev.label, BEACONS[ev.beaconIdx].color);
+    });
+
+    if (UI.pbStep >= UI.pbPositions.length) {
+      clearInterval(UI.pbTimer); UI.pbTimer = null;
+      UI.playing = false;
+      UI.oppTrail = [];
+      onComplete();
+    }
+  }, CONFIG.PLAYBACK_MS);
+}
+
+// Commit a completed turn's results to State.
+function commitTurn(myResult, logEntry) {
+  State.ship.pos    = myResult.finalPos;
+  State.ship.vel    = myResult.finalVel;
+  State.ship.angle  = myResult.finalAngle;
+  State.ship.angVel = myResult.finalAngVel;
+  State.nextCheckIdx = myResult.finalCheckIdx;
+  State.replayLog.push(logEntry);
+  State.lapTurns++;
+  State.turnNum++;
+  State.commands = [];
+  UI.pbPositions = [];
+  UI.pbStep      = 0;
+  UI.panOffset   = {x:0, y:0};
+  document.getElementById('turn-num').textContent = String(State.turnNum).padStart(3,'0');
+}
+
+// Resolve a turn after both command sets are known.
+// Called by both solo (immediately) and multiplayer (after opponent commands arrive).
+function resolveTurn(myCommands, oppCommands, logEntry) {
+  document.getElementById('phase').textContent = 'SIMULATING';
+
+  const myResult  = simulate(State.ship.pos, State.ship.vel, State.ship.angle,
+                              State.ship.angVel, myCommands, State.nextCheckIdx, State.rocks);
+  logEntry.trail       = myResult.trail;
+  logEntry.checkpoints = myResult.checkpointEvents;
+
+  // Simulate opponent from their current position (multiplayer only)
+  const oppResult = (State.opponent && oppCommands)
+    ? simulate(State.opponent.pos, State.opponent.vel, State.opponent.angle,
+                State.opponent.angVel, oppCommands, State.nextCheckIdx, State.rocks)
+    : null;
+
+  playbackTurn(myResult, oppResult, () => {
+    commitTurn(myResult, logEntry);
+
+    // Update opponent's live position from their simulation result
+    if (oppResult && State.opponent) {
+      State.opponent.pos    = oppResult.finalPos;
+      State.opponent.vel    = oppResult.finalVel;
+      State.opponent.angle  = oppResult.finalAngle;
+      State.opponent.angVel = oppResult.finalAngVel;
+    }
+
+    document.getElementById('phase').textContent = 'PLANNING';
+    const execBtn = document.getElementById('btn-exec');
+
+    if (State.nextCheckIdx >= CHECKPOINT_ORDER.length) {
+      State.lapComplete = true;
+      execBtn.disabled = true;
+      showLapComplete();
+    } else {
+      execBtn.disabled = false;
+      setStatus(`TURN ${State.turnNum-1} COMPLETE — NEXT CHECKPOINT: ${BEACONS[CHECKPOINT_ORDER[State.nextCheckIdx]].label}`);
+    }
+    updateSelPanel(); renderSeq();
+  });
+}
+
+// Watch the entire turn node and resolve when BOTH command slots are filled.
+// This is more robust than watching just the opponent slot — both clients
+// subscribe to the same path and trigger simultaneously when both have submitted.
+// It also avoids the race condition where client 2 could delete data before
+// client 1 even subscribes.
+function watchTurnComplete(turnNum, myCommands, logEntry) {
+  const { db, ref, onValue } = window.FB;
+  const turnRef = ref(db, `games/${Lobby.roomId}/turns/${turnNum}`);
+
+  setStatus('COMMANDS SUBMITTED — WAITING FOR OPPONENT...');
+  document.getElementById('phase').textContent = 'WAITING';
+
+  const unsub = onValue(turnRef, snapshot => {
+    if (!snapshot.exists()) return;
+    const data = snapshot.val();
+
+    // Wait until BOTH players have set ready:true before resolving.
+    // Checking the sentinel rather than the commands array because Firebase
+    // silently drops empty arrays — a player submitting with no commands
+    // would never satisfy a commands-based check.
+    if (!data.alpha?.ready || !data.beta?.ready) return;
+
+    unsub(); // unsubscribe before doing any work
+
+    const oppSlot    = Lobby.mySlot === 'alpha' ? 'beta' : 'alpha';
+    const raw        = data[oppSlot].commands || {};
+    const oppCommands = Object.values(raw);
+    resolveTurn(myCommands, oppCommands, logEntry);
+  });
+}
+
+document.getElementById('btn-exec').addEventListener('click', function() {
+  if (UI.playing || State.lapComplete) return;
+  this.disabled = true; UI.selCmd = null; updateSelPanel();
+
+  // Snapshot for replay log before commands are cleared
+  const logEntry = {
+    turn:       State.turnNum,
+    startPos:   {...State.ship.pos},
+    startVel:   {...State.ship.vel},
+    startAngle: State.ship.angle,
+    startAngVel:State.ship.angVel,
+    commands:   State.commands.map(c => ({...c})),
+  };
+  const myCommands = State.commands.slice(); // copy for Firebase write
+
+  if (Lobby.mode === 'multi' && window.FB) {
+    // ── Multiplayer path ────────────────────────────────────
+    // Write commands to Firebase then wait for opponent
+    const { db, ref, set } = window.FB;
+    const turnRef = ref(db, `games/${Lobby.roomId}/turns/${State.turnNum}/${Lobby.mySlot}`);
+    set(turnRef, {
+      ready:    true,                           // sentinel — always written even if commands is empty
+      commands: myCommands.map(serializeCmd),
+    }).then(() => {
+      watchTurnComplete(State.turnNum, myCommands, logEntry);
+    });
+  } else {
+    // ── Solo path ───────────────────────────────────────────
+    setStatus('EXECUTING TURN...');
+    resolveTurn(myCommands, null, logEntry);
+  }
+});
+
+document.getElementById('btn-clear').addEventListener('click',()=>{
+  if (UI.playing) return;
+  State.commands=[]; UI.selCmd=null; updateSelPanel(); renderSeq();
+  setStatus('ALL COMMANDS CLEARED');
+});
+
+
+// ═══════════════════════════════════════════════════════════
+//  REPLAY SYSTEM
+//
+//  Plays back the replayLog entry by entry.
+//  Each entry contains the full trail — no re-simulation needed.
+//  This is also the blueprint for multiplayer: each client will
+//  send their command array and receive their opponent's, then
+//  both simulate independently to produce identical results.
+// ═══════════════════════════════════════════════════════════
+
+function startReplay() {
+  if (!State.replayLog.length) return;
+  document.getElementById('lap-overlay').classList.add('hidden');
+  Replay.active=true; Replay.turnIdx=0;
+  document.getElementById('replay-controls').classList.remove('hidden');
+  playReplayTurn();
+}
+
+function playReplayTurn() {
+  if (Replay.turnIdx>=State.replayLog.length) { endReplay(); return; }
+  const entry=State.replayLog[Replay.turnIdx];
+
+  // Restore the ship to exactly where it was at the start of this turn
+  State.ship.pos    ={...entry.startPos};
+  State.ship.vel    ={...entry.startVel};
+  State.ship.angle  =entry.startAngle;
+  State.ship.angVel =entry.startAngVel;
+  UI.pbPositions=entry.trail; UI.pbStep=0;
+  UI.playing=true; UI.panOffset={x:0,y:0};
+
+  document.getElementById('replay-turn-disp').textContent=
+    `TURN ${entry.turn} / ${State.replayLog.length}`;
+
+  if (Replay.timer) clearInterval(Replay.timer);
+  Replay.timer=setInterval(()=>{
+    UI.pbStep++;
+    entry.checkpoints.forEach(ev=>{
+      if (UI.pbStep===ev.step) flashCheckpoint(ev.label, BEACONS[ev.beaconIdx].color);
+    });
+    renderSeq();
+    if (UI.pbStep>=UI.pbPositions.length) {
+      clearInterval(Replay.timer); Replay.timer=null;
+      const last=entry.trail[entry.trail.length-1];
+      State.ship.pos   ={x:last.x,y:last.y};
+      State.ship.vel   ={x:last.vx,y:last.vy};
+      State.ship.angle = last.angle;
+      State.ship.angVel= last.angVel||0;
+      UI.pbPositions=[]; UI.pbStep=0; UI.playing=false;
+      Replay.turnIdx++;
+      setTimeout(playReplayTurn,400); // brief pause between turns
+    }
+  }, CONFIG.PLAYBACK_MS);
+}
+
+function endReplay() {
+  UI.playing=false; Replay.active=false;
+  UI.pbPositions=[]; UI.pbStep=0;
+  document.getElementById('replay-controls').classList.add('hidden');
+  showLapComplete();
+}
+
+document.getElementById('btn-replay').addEventListener('click',startReplay);
+document.getElementById('btn-replay-stop').addEventListener('click',()=>{
+  if (Replay.timer) clearInterval(Replay.timer);
+  endReplay();
+});
+
+
+// ═══════════════════════════════════════════════════════════
+//  LAP / CHECKPOINT SYSTEM
+// ═══════════════════════════════════════════════════════════
+
+let cpFlashTimer=null;
+function flashCheckpoint(label,color) {
+  const el=document.getElementById('cp-flash');
+  const txt=document.getElementById('cp-text');
+  txt.textContent=`✓ ${label} CLEARED`; txt.style.color=color;
+  el.classList.remove('hidden'); el.style.opacity='1';
+  if (cpFlashTimer) clearTimeout(cpFlashTimer);
+  cpFlashTimer=setTimeout(()=>{
+    el.style.transition='opacity 0.8s'; el.style.opacity='0';
+    setTimeout(()=>{ el.classList.add('hidden'); el.style.transition=''; },800);
+  },1200);
+}
+
+function showLapComplete() {
+  document.getElementById('lap-turns').textContent=State.lapTurns;
+  document.getElementById('lap-seed').textContent =State.courseConfig.seed;
+  document.getElementById('lap-overlay').classList.remove('hidden');
+}
+
+// Reset lap — keeps the same course, returns ship to start
+function resetLap() {
+  State.ship=startStateForSlot(Lobby.mySlot||'alpha');
+  State.commands=[]; State.nextCheckIdx=0; State.lapTurns=0;
+  State.lapComplete=false; State.replayLog=[]; State.turnNum=1;
+  UI.selCmd=null; UI.playing=false; UI.panOffset={x:0,y:0};
+  if (UI.pbTimer) { clearInterval(UI.pbTimer); UI.pbTimer=null; }
+  document.getElementById('turn-num').textContent='001';
+  document.getElementById('phase').textContent='PLANNING';
+  document.getElementById('btn-exec').disabled=false;
+  document.getElementById('lap-overlay').classList.add('hidden');
+  updateSelPanel(); renderSeq();
+  setStatus(`MISSION RESET — NEXT CHECKPOINT: ${BEACONS[CHECKPOINT_ORDER[0]].label}`);
+}
+
+document.getElementById('btn-retry').addEventListener('click',resetLap);
+document.getElementById('btn-lap-menu').addEventListener('click',()=>{
+  document.getElementById('lap-overlay').classList.add('hidden');
+  exitToMenu();
+});
+
+
+// ═══════════════════════════════════════════════════════════
+//  MAIN MENU
+// ═══════════════════════════════════════════════════════════
+
+// Wire up menu sliders to show live value labels
+function menuSlider(id,valId,suffix,decimals) {
+  const el=document.getElementById(id), vl=document.getElementById(valId);
+  vl.textContent=parseFloat(el.value).toFixed(decimals)+suffix;
+  el.addEventListener('input',()=>{ vl.textContent=parseFloat(el.value).toFixed(decimals)+suffix; });
+}
+menuSlider('mn-count','mv-count','',0);
+menuSlider('mn-minr', 'mv-minr',' km',1);
+menuSlider('mn-maxr', 'mv-maxr',' km',1);
+menuSlider('mn-gap',  'mv-gap', ' km',1);
+menuSlider('mn-bclear','mv-bclear',' km',0);
+menuSlider('mn-sclear','mv-sclear',' km',0);
+
+document.getElementById('btn-rand-seed').addEventListener('click',()=>{
+  document.getElementById('mn-seed').value=Math.floor(Math.random()*999999)+1;
+});
+
+function launchGame(overrideConfig) {
+  // Use config passed from Firebase (non-host) or read from menu sliders (host/solo)
+  State.courseConfig = overrideConfig || {
+    seed:        parseInt(document.getElementById('mn-seed').value)   || 42,
+    count:       parseInt(document.getElementById('mn-count').value)  || 80,
+    minR:       parseFloat(document.getElementById('mn-minr').value)  || 1.5,
+    maxR:       parseFloat(document.getElementById('mn-maxr').value)  || 7,
+    gap:        parseFloat(document.getElementById('mn-gap').value)   || 1,
+    beaconClear: parseInt(document.getElementById('mn-bclear').value) || 14,
+    shipClear:   parseInt(document.getElementById('mn-sclear').value) || 10,
+  };
+
+  // Generate new course
+  State.rocks=generateRocks(State.courseConfig);
+
+  // In multiplayer, initialise opponent at the other slot's start position
+  if (Lobby.mode === 'multi') {
+    const oppSlot = Lobby.mySlot === 'alpha' ? 'beta' : 'alpha';
+    State.opponent = startStateForSlot(oppSlot);
+  } else {
+    State.opponent = null;
+  }
+
+  // Reset all game and UI state
+  State.ship=startStateForSlot(Lobby.mySlot||'alpha');
+  State.commands=[]; State.nextCheckIdx=0; State.lapTurns=0;
+  State.lapComplete=false; State.replayLog=[]; State.turnNum=1;
+  UI.selCmd=null; UI.playing=false; UI.panOffset={x:0,y:0};
+  UI.pbPositions=[]; UI.pbStep=0;
+  if (UI.pbTimer) { clearInterval(UI.pbTimer); UI.pbTimer=null; }
+  document.getElementById('lap-overlay').classList.add('hidden');
+  document.getElementById('turn-num').textContent='001';
+  document.getElementById('phase').textContent='PLANNING';
+  document.getElementById('btn-exec').disabled=false;
+  updateSelPanel(); renderSeq();
+  document.getElementById('menu-overlay').classList.add('hidden');
+  setStatus(`MISSION LAUNCHED — SEED: ${State.courseConfig.seed} · ${State.rocks.length} ROCKS · NEXT: BETA`);
+}
+
+function exitToMenu() {
+  if (UI.pbTimer) { clearInterval(UI.pbTimer); UI.pbTimer=null; }
+  if (Replay.timer) { clearInterval(Replay.timer); Replay.timer=null; }
+  UI.playing=false; Replay.active=false;
+  State.commands=[]; UI.selCmd=null;
+  updateSelPanel(); renderSeq();
+  document.getElementById('menu-overlay').classList.remove('hidden');
+}
+
+// In multiplayer mode, the host's launch button syncs config to Firebase
+// before launching. In solo mode it calls launchGame directly.
+document.getElementById('btn-launch').addEventListener('click', () => {
+  if (Lobby.mode === 'multi' && Lobby.isHost) multiLaunch();
+  else launchGame();
+});
+document.getElementById('btn-exit-game').addEventListener('click',exitToMenu);
+
+
+// ═══════════════════════════════════════════════════════════
+//  VIEWPORT CONTROLS
+// ═══════════════════════════════════════════════════════════
+
+// Overlay toggle panel (DISPLAY checkboxes)
+document.getElementById('overlay-toggle-header').addEventListener('click',()=>{
+  const items=document.getElementById('overlay-items');
+  const arrow=document.getElementById('ov-arrow');
+  const collapsed=items.classList.toggle('hidden');
+  arrow.textContent=collapsed?'▶':'▼';
+});
+document.querySelectorAll('.ov-item').forEach(el=>{
+  el.addEventListener('click',()=>{
+    const key=el.dataset.key;
+    UI.overlays[key]=!UI.overlays[key];
+    const check=el.querySelector('.ov-check');
+    check.textContent=UI.overlays[key]?'✓':'';
+    check.classList.toggle('on',UI.overlays[key]);
+  });
+});
+
+// Cursor-centred zoom — keeps the world point under the cursor stationary
+mc.addEventListener('wheel',e=>{
+  e.preventDefault();
+  const factor=e.deltaY<0?1.1:0.9;
+  const newScale=Math.min(CONFIG.SCALE_MAX,Math.max(CONFIG.SCALE_MIN,UI.scale*factor));
+  const f=newScale/UI.scale;
+  const rect=mc.getBoundingClientRect();
+  const mx=e.clientX-rect.left, my=e.clientY-rect.top;
+  UI.panOffset.x=mx-mc.width/2  -(mx-mc.width/2  -UI.panOffset.x)*f;
+  UI.panOffset.y=my-mc.height/2 -(my-mc.height/2 -UI.panOffset.y)*f;
+  UI.scale=newScale;
+  document.getElementById('zoom-disp').textContent=Math.round(UI.scale);
+},{passive:false});
+
+// Right-click drag to pan
+mc.addEventListener('contextmenu',e=>e.preventDefault());
+mc.addEventListener('mousedown',e=>{
+  if (e.button!==2) return;
+  UI.panDrag={active:true,startX:e.clientX,startY:e.clientY,ox:UI.panOffset.x,oy:UI.panOffset.y};
+  mc.style.cursor='grabbing';
+});
+mc.addEventListener('mousemove',e=>{
+  if (!UI.panDrag.active) return;
+  UI.panOffset.x=UI.panDrag.ox+(e.clientX-UI.panDrag.startX);
+  UI.panOffset.y=UI.panDrag.oy+(e.clientY-UI.panDrag.startY);
+});
+mc.addEventListener('mouseup',e=>{
+  if (e.button!==2) return;
+  UI.panDrag.active=false; mc.style.cursor='';
+});
+mc.addEventListener('mouseleave',()=>{ UI.panDrag.active=false; mc.style.cursor=''; });
+
+// Double-click viewport to snap pan back to ship
+mc.addEventListener('dblclick',()=>{
+  UI.panOffset={x:0,y:0};
+  setStatus('VIEW RECENTERED ON HULL-01');
+});
+
+
+// ═══════════════════════════════════════════════════════════
+//  EDIT MODAL
+//
+//  Double-click a sequencer bar to open a numeric editor.
+//  Lets the player type exact values instead of dragging.
+// ═══════════════════════════════════════════════════════════
+let modalTarget=null;
+
+function openModal(cmd) {
+  modalTarget=cmd;
+  const tr=TRACKS.find(t=>t.id===cmd.track);
+  document.getElementById('modal-title').textContent=`EDIT — ${tr?tr.label:cmd.track.toUpperCase()} COMMAND`;
+  document.getElementById('m-start').value=cmd.startStep;
+  document.getElementById('m-stop').value =cmd.stopStep;
+  const isThr=cmd.type==='thrust';
+  document.getElementById('m-row-mag').style.display=isThr?'flex':'none';
+  document.getElementById('m-row-deg').style.display=isThr?'none':'flex';
+  document.getElementById('m-row-dir').style.display=isThr?'none':'flex';
+  if (isThr) { document.getElementById('m-mag').value=cmd.newtons||50000; }
+  else {
+    document.getElementById('m-deg').value=cmd.torque||25;
+    document.getElementById('m-ccw').classList.toggle('active',!cmd.cw);
+    document.getElementById('m-cw').classList.toggle('active',cmd.cw);
+  }
+  document.getElementById('modal-overlay').classList.add('open');
+}
+
+function closeModal() {
+  document.getElementById('modal-overlay').classList.remove('open');
+  modalTarget=null;
+}
+
+function applyModal() {
+  if (!modalTarget) return;
+  const start=parseInt(document.getElementById('m-start').value);
+  const stop =parseInt(document.getElementById('m-stop').value);
+  if (isNaN(start)||isNaN(stop)||stop<=start) { setStatus('INVALID VALUES — STOP MUST BE > START'); return; }
+  modalTarget.startStep=Math.max(0,Math.min(CONFIG.STEPS-1,start));
+  modalTarget.stopStep =Math.max(1,Math.min(CONFIG.STEPS,stop));
+  if (modalTarget.type==='thrust') {
+    modalTarget.newtons=parseFloat(document.getElementById('m-mag').value)||50000;
+  } else {
+    modalTarget.torque=Math.min(25,Math.max(1,parseFloat(document.getElementById('m-deg').value)||25));
+    modalTarget.cw=document.getElementById('m-cw').classList.contains('active');
+  }
+  selectCmd(modalTarget); closeModal(); renderSeq(); setStatus('COMMAND UPDATED');
+}
+
+document.getElementById('m-ok').addEventListener('click',applyModal);
+document.getElementById('m-cancel').addEventListener('click',closeModal);
+document.getElementById('modal-overlay').addEventListener('click',e=>{
+  if (e.target===document.getElementById('modal-overlay')) closeModal();
+});
+document.getElementById('m-ccw').addEventListener('click',function(){
+  this.classList.add('active'); document.getElementById('m-cw').classList.remove('active');
+});
+document.getElementById('m-cw').addEventListener('click',function(){
+  this.classList.add('active'); document.getElementById('m-ccw').classList.remove('active');
+});
+document.getElementById('modal').addEventListener('keydown',e=>{
+  if (e.key==='Enter') applyModal();
+  if (e.key==='Escape') closeModal();
+});
+
+
+// ═══════════════════════════════════════════════════════════
+//  LOBBY SYSTEM
+//
+//  Handles the pre-game flow:
+//    1. Wait for Firebase to be ready (anonymous auth complete)
+//    2. Player picks Solo or Multiplayer
+//    3. Multiplayer: Create a room (generates a 6-char code)
+//                    OR Join a room (enter the code)
+//    4. Both players appear in the room → Proceed button unlocks
+//    5. On proceed: host pushes course config to Firebase,
+//                   both clients launch with identical settings
+//
+//  The room structure in Firebase:
+//    /games/{roomId}/
+//      players/
+//        alpha: { uid, name }
+//        beta:  { uid, name }
+//      courseConfig: { seed, count, ... }   ← written by host on proceed
+//      phase: "lobby" | "playing"
+// ═══════════════════════════════════════════════════════════
+
+// Lobby state — separate from game State to keep concerns clear
+const Lobby = {
+  mode:        'solo',
+  roomId:      null,
+  mySlot:      null,
+  isHost:      false,
+  roomRef:     null,
+  unsubscribe: null,
+  launched:    false,   // guard against receiveCourseAndLaunch firing multiple times
+};
+
+// Generate a readable 6-character room code from random bytes
+function generateRoomCode() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no ambiguous 0/O/1/I
+  let code = '';
+  for (let i = 0; i < 6; i++) code += chars[Math.floor(Math.random() * chars.length)];
+  return code;
+}
+
+function lobbySetStatus(msg, type = '') {
+  const el = document.getElementById('lobby-status');
+  el.textContent = msg;
+  el.className = type; // '' | 'ok' | 'error'
+}
+
+// ── Mode selection ───────────────────────────────────────────
+document.getElementById('btn-mode-solo').addEventListener('click', () => {
+  Lobby.mode = 'solo';
+  document.getElementById('btn-mode-solo').classList.add('active');
+  document.getElementById('btn-mode-multi').classList.remove('active');
+  document.getElementById('lobby-mp-panel').classList.remove('visible');
+  document.getElementById('btn-lobby-proceed').disabled = false;
+  lobbySetStatus('SOLO MODE — CONFIGURE AND LAUNCH', 'ok');
+});
+
+document.getElementById('btn-mode-multi').addEventListener('click', () => {
+  Lobby.mode = 'multi';
+  document.getElementById('btn-mode-multi').classList.add('active');
+  document.getElementById('btn-mode-solo').classList.remove('active');
+  document.getElementById('lobby-mp-panel').classList.add('visible');
+  document.getElementById('btn-lobby-proceed').disabled = true;
+  lobbySetStatus('CREATE A ROOM OR ENTER A CODE TO JOIN');
+});
+
+// ── Create room ──────────────────────────────────────────────
+document.getElementById('btn-create-room').addEventListener('click', async () => {
+  if (!window.FB) { lobbySetStatus('NOT CONNECTED — PLEASE WAIT', 'error'); return; }
+  const { db, ref, set, onValue, uid } = window.FB;
+
+  const code    = generateRoomCode();
+  Lobby.roomId  = code;
+  Lobby.mySlot  = 'alpha';
+  Lobby.isHost  = true;
+  Lobby.roomRef = ref(db, `games/${code}`);
+
+  // Write initial room state to Firebase
+  await set(Lobby.roomRef, {
+    players: { alpha: { uid, name: `HULL-${uid.slice(0,4).toUpperCase()}` } },
+    phase: 'lobby',
+  });
+
+  // Clean up room if this player closes the tab
+  // (Firebase onDisconnect runs server-side even if the client drops)
+  const { onDisconnect } = await import("https://www.gstatic.com/firebasejs/12.11.0/firebase-database.js");
+  onDisconnect(Lobby.roomRef).remove();
+
+  showRoomDisplay(code);
+  watchRoom();
+  lobbySetStatus(`ROOM CREATED — SHARE CODE: ${code}`, 'ok');
+});
+
+// ── Join room ────────────────────────────────────────────────
+document.getElementById('btn-join-room').addEventListener('click', async () => {
+  if (!window.FB) { lobbySetStatus('NOT CONNECTED — PLEASE WAIT', 'error'); return; }
+  const { db, ref, get, update, uid } = window.FB;
+
+  const code = document.getElementById('join-code-input').value.trim().toUpperCase();
+  if (code.length !== 6) { lobbySetStatus('ENTER A VALID 6-CHARACTER CODE', 'error'); return; }
+
+  const roomRef  = ref(db, `games/${code}`);
+  const snapshot = await get(roomRef);
+
+  if (!snapshot.exists()) {
+    lobbySetStatus(`ROOM ${code} NOT FOUND`, 'error'); return;
+  }
+
+  const data = snapshot.val();
+  if (data.players?.beta) {
+    lobbySetStatus('ROOM IS FULL', 'error'); return;
+  }
+
+  // Join as beta player
+  Lobby.roomId  = code;
+  Lobby.mySlot  = 'beta';
+  Lobby.isHost  = false;
+  Lobby.roomRef = roomRef;
+
+  await update(ref(db, `games/${code}/players`), {
+    beta: { uid, name: `HULL-${uid.slice(0,4).toUpperCase()}` }
+  });
+
+  showRoomDisplay(code);
+  watchRoom();
+  lobbySetStatus(`JOINED ROOM ${code}`, 'ok');
+});
+
+// ── Show room display panel ──────────────────────────────────
+function showRoomDisplay(code) {
+  document.getElementById('lobby-room-code').textContent    = code;
+  document.getElementById('lobby-room-display').style.display = 'block';
+  document.getElementById('btn-create-room').disabled = true;
+  document.getElementById('btn-join-room').disabled   = true;
+}
+
+// ── Watch room for player changes ────────────────────────────
+//
+//  onValue() subscribes to a Firebase path and fires immediately
+//  with current data, then again every time it changes.
+//  This is how both clients stay in sync — no polling needed.
+//
+function watchRoom() {
+  const { onValue } = window.FB;
+
+  // Unsubscribe from any previous listener
+  if (Lobby.unsubscribe) Lobby.unsubscribe();
+
+  Lobby.unsubscribe = onValue(Lobby.roomRef, snapshot => {
+    if (!snapshot.exists()) {
+      lobbySetStatus('ROOM CLOSED BY HOST', 'error');
+      document.getElementById('btn-lobby-proceed').disabled = true;
+      return;
+    }
+
+    const data    = snapshot.val();
+    const players = data.players || {};
+    const alpha   = players.alpha;
+    const beta    = players.beta;
+
+    // Update player slot displays
+    const slotA = document.getElementById('slot-alpha');
+    const slotB = document.getElementById('slot-beta');
+    slotA.textContent = alpha ? `ALPHA — ${alpha.name}` : 'ALPHA — WAITING';
+    slotA.className   = `lobby-player-slot ${alpha ? 'filled' : ''}`;
+    slotB.textContent = beta  ? `BETA  — ${beta.name}`  : 'BETA  — WAITING';
+    slotB.className   = `lobby-player-slot ${beta  ? 'filled' : ''}`;
+
+    // Both players present — unlock proceed
+    const bothReady = alpha && beta;
+    document.getElementById('btn-lobby-proceed').disabled = !bothReady;
+    if (bothReady) {
+      if (Lobby.isHost) {
+        lobbySetStatus('BOTH PLAYERS READY — PROCEED TO CONFIGURE AND LAUNCH', 'ok');
+        document.getElementById('btn-lobby-proceed').textContent = '▶ CONFIGURE MISSION';
+      } else {
+        lobbySetStatus('BOTH PLAYERS READY — WAITING FOR HOST TO LAUNCH', 'ok');
+        document.getElementById('btn-lobby-proceed').textContent = '▶ READY';
+      }
+    }
+
+    // If host pushed courseConfig, non-host client should launch
+    if (data.phase === 'playing' && !Lobby.isHost) {
+      receiveCourseAndLaunch(data.courseConfig);
+    }
+  });
+}
+
+// ── Proceed button ───────────────────────────────────────────
+document.getElementById('btn-lobby-proceed').addEventListener('click', () => {
+  if (Lobby.mode === 'solo') {
+    document.getElementById('lobby-overlay').classList.add('hidden');
+    document.getElementById('menu-overlay').classList.remove('hidden');
+    return;
+  }
+  // Multiplayer — only host sees the config screen
+  document.getElementById('lobby-overlay').classList.add('hidden');
+  if (Lobby.isHost) {
+    document.getElementById('menu-overlay').classList.remove('hidden');
+  } else {
+    // Non-host waits for host to configure and launch
+    document.getElementById('waiting-overlay').classList.remove('hidden');
+  }
+});
+
+// ── startGameplay ────────────────────────────────────────────
+//
+//  Single entry point for both host and non-host when the game starts.
+//  Stops the lobby room watcher (no longer needed once in-game),
+//  hides all lobby-related overlays, then calls launchGame.
+//  Keeping this in one place prevents overlay state getting out of sync.
+//
+function startGameplay(courseConfig) {
+  // Stop watchRoom — it watches the entire room path and would fire on
+  // every turn write during gameplay, which is noisy and can cause issues.
+  if (Lobby.unsubscribe) { Lobby.unsubscribe(); Lobby.unsubscribe = null; }
+
+  // Hide every overlay that might be visible at this point
+  ['lobby-overlay', 'menu-overlay', 'waiting-overlay'].forEach(id =>
+    document.getElementById(id).classList.add('hidden')
+  );
+
+  launchGame(courseConfig);
+}
+
+// ── Host pushes course config and launches ───────────────────
+async function multiLaunch() {
+  if (!Lobby.isHost || Lobby.mode !== 'multi') { startGameplay(); return; }
+  const { db, ref, update } = window.FB;
+
+  const courseConfig = {
+    seed:        parseInt(document.getElementById('mn-seed').value)   || 42,
+    count:       parseInt(document.getElementById('mn-count').value)  || 80,
+    minR:       parseFloat(document.getElementById('mn-minr').value)  || 1.5,
+    maxR:       parseFloat(document.getElementById('mn-maxr').value)  || 7,
+    gap:        parseFloat(document.getElementById('mn-gap').value)   || 1,
+    beaconClear: parseInt(document.getElementById('mn-bclear').value) || 14,
+    shipClear:   parseInt(document.getElementById('mn-sclear').value) || 10,
+  };
+
+  // Push config and signal non-host to launch
+  await update(ref(window.FB.db, `games/${Lobby.roomId}`), {
+    courseConfig,
+    phase: 'playing',
+  });
+
+  startGameplay(courseConfig);
+}
+
+// ── Non-host receives config and launches ────────────────────
+function receiveCourseAndLaunch(courseConfig) {
+  if (!courseConfig || Lobby.launched) return;
+  Lobby.launched = true;
+  startGameplay(courseConfig);
+}
+
+// ── Firebase ready handler ───────────────────────────────────
+//
+//  Firebase initialisation is async. The 'firebase-ready' event
+//  fires once anonymous auth is complete and window.FB is populated.
+//  Until then we show a connecting message.
+//
+window.addEventListener('firebase-ready', () => {
+  lobbySetStatus('CONNECTED — SELECT A MODE TO BEGIN', 'ok');
+  // Enable lobby buttons that require auth
+  document.getElementById('btn-create-room').disabled = false;
+  document.getElementById('btn-join-room').disabled   = false;
+});
+
+// ═══════════════════════════════════════════════════════════
+//  INITIALISE
+// ═══════════════════════════════════════════════════════════
+
+function resize() {
+  const vp=document.getElementById('viewport');
+  mc.width =vp.clientWidth;
+  mc.height=vp.clientHeight;
+  seqC.width =seqC.parentElement.clientWidth;
+  seqC.height=SEQ_H;
+  render(); renderSeq();
+}
+window.addEventListener('resize',resize);
+
+// setStatus: updates the status bar text at the bottom of the screen
+function setStatus(m) { document.getElementById('statusbar').textContent=m; }
+
+// Main render loop — runs every animation frame (~60fps).
+// Only renders; all state changes happen in response to events.
+function loop() { render(); requestAnimationFrame(loop); }
+
+// ── INITIALISE ───────────────────────────────────────────────
+// Generate an initial course so the game has rocks when the menu opens.
+// The player will regenerate with their own settings on launch.
+State.rocks = generateRocks(State.courseConfig);
+
+// Defer the first resize to after the browser has finished layout.
+// Without this, clientWidth/clientHeight can be 0 on first paint,
+// which produces a blank canvas that only recovers when DevTools forces a reflow.
+requestAnimationFrame(() => {
+  resize();
+  updateSelPanel();
+  loop();
+  setStatus('SYSTEM READY — CONFIGURE YOUR MISSION AND PRESS LAUNCH');
+});
+</script>
+</body>
+</html>
