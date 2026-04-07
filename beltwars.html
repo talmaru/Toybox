@@ -61,15 +61,17 @@ const FIREBASE_CONFIG = {
 
   * { margin:0; padding:0; box-sizing:border-box; }
 
+  html { height: 100%; }
+
   body {
     background: var(--bg);
     color: var(--text);
     font-family: 'Courier New', Courier, monospace;
-    height: 100vh;
+    height: 100%;
     display: flex;
-    flex-direction: column;  /* header → main area → cmd panel → sequencer → status */
+    flex-direction: column;
     overflow: hidden;
-    user-select: none;       /* prevent text selection during drag */
+    user-select: none;
   }
 
   /* CRT scanline overlay — purely cosmetic, pointer-events:none so it never blocks clicks */
@@ -89,7 +91,7 @@ const FIREBASE_CONFIG = {
 
   /* ── MAIN AREA (viewport only — sidebar removed in refactor) */
   #main { flex: 1; display: flex; overflow: hidden; min-height: 0; }
-  #viewport { flex: 1; position: relative; overflow: hidden; }
+  #viewport { flex: 1; position: relative; overflow: hidden; min-height: 0; }
   #main-canvas { display: block; width: 100%; height: 100%; }
 
   /* ── NAV STATUS STRIP ──────────────────────────────────────
