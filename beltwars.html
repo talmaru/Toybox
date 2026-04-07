@@ -271,6 +271,12 @@ const FIREBASE_CONFIG = {
   #replay-controls.hidden { display: none; }
   #waiting-overlay { display: flex; }
   #waiting-overlay.hidden { display: none; }
+  .colour-swatch {
+    width: 24px; height: 24px; border-radius: 3px; cursor: pointer;
+    border: 2px solid transparent; transition: border-color 0.1s, transform 0.1s;
+  }
+  .colour-swatch:hover  { transform: scale(1.15); }
+  .colour-swatch.active { border-color: var(--bright); transform: scale(1.15); }
   @keyframes pulse-dots {
     0%,100% { opacity: 1; } 50% { opacity: 0.2; }
   }
@@ -345,7 +351,7 @@ const FIREBASE_CONFIG = {
   <span class="h-title">BELT WARS</span>
   <span class="h-meta">TURN <span id="turn-num">001</span> &nbsp;|&nbsp; <span id="phase">PLANNING</span></span>
   <span class="h-meta" style="display:flex;align-items:center;gap:14px;">
-    HULL-01 &nbsp;|&nbsp; AI INSTANCE ALPHA &nbsp;|&nbsp; ZOOM <span id="zoom-disp">55</span>px/u
+    <span id="pilot-display">HULL-01</span> &nbsp;|&nbsp; AI INSTANCE ALPHA &nbsp;|&nbsp; ZOOM <span id="zoom-disp">55</span>px/u
     <button id="btn-exit-game">⬡ MENU</button>
   </span>
 </div>
@@ -362,6 +368,29 @@ const FIREBASE_CONFIG = {
     <div id="lobby-status">CONNECTING TO NETWORK...</div>
 
     <div id="lobby-panels">
+      <!-- Pilot configuration — shown for all modes -->
+      <div style="border-bottom:1px solid var(--grid);padding-bottom:14px;margin-bottom:14px;">
+        <div class="m-section-title">PILOT CONFIGURATION</div>
+        <div class="lobby-row">
+          <label>CALLSIGN</label>
+          <input type="text" id="pilot-name" maxlength="12" placeholder="ENTER CALLSIGN"
+            style="flex:1;background:var(--dim);border:1px solid var(--grid);color:var(--bright);
+                   font-family:inherit;font-size:13px;padding:5px 8px;letter-spacing:2px;text-transform:uppercase;">
+        </div>
+        <div class="lobby-row" style="margin-top:10px;">
+          <label>SHIP COLOUR</label>
+          <div id="colour-swatches" style="display:flex;gap:8px;flex-wrap:wrap;">
+            <div class="colour-swatch active" data-colour="#00ff88" style="background:#00ff88;" title="ALPHA GREEN"></div>
+            <div class="colour-swatch" data-colour="#00aaff" style="background:#00aaff;" title="BETA BLUE"></div>
+            <div class="colour-swatch" data-colour="#ffaa00" style="background:#ffaa00;" title="AMBER"></div>
+            <div class="colour-swatch" data-colour="#ff4444" style="background:#ff4444;" title="RED"></div>
+            <div class="colour-swatch" data-colour="#cc44ff" style="background:#cc44ff;" title="VIOLET"></div>
+            <div class="colour-swatch" data-colour="#ff8844" style="background:#ff8844;" title="ORANGE"></div>
+            <div class="colour-swatch" data-colour="#44ffcc" style="background:#44ffcc;" title="CYAN"></div>
+            <div class="colour-swatch" data-colour="#ffffff" style="background:#ffffff;" title="WHITE"></div>
+          </div>
+        </div>
+      </div>
       <!-- Mode selection -->
       <div class="lobby-mode-btns">
         <button class="lobby-mode-btn active" id="btn-mode-solo">⬡ SOLO</button>
@@ -1450,11 +1479,12 @@ function drawShip() {
   // Triangle pointing up — ship facing is always "up"
   mctx.beginPath();
   mctx.moveTo(sx,sy-10); mctx.lineTo(sx-7,sy+7*0.8); mctx.lineTo(sx+7,sy+7*0.8);
-  mctx.closePath(); mctx.fillStyle='#002200'; mctx.fill();
-  mctx.strokeStyle='#66ff66'; mctx.lineWidth=1.5; mctx.stroke();
-  mctx.beginPath(); mctx.arc(sx,sy-10,2,0,Math.PI*2); mctx.fillStyle='#00ff88'; mctx.fill();
+  mctx.closePath(); mctx.fillStyle='#001a00'; mctx.fill();
+  mctx.strokeStyle=Pilot.colour; mctx.lineWidth=1.5; mctx.stroke();
+  mctx.beginPath(); mctx.arc(sx,sy-10,2,0,Math.PI*2);
+  mctx.fillStyle=Pilot.colour; mctx.fill();
 
-  // Amber velocity arrow — length proportional to speed, direction in ship-relative space
+  // Velocity arrow in player colour
   const liveVel = (UI.playing && UI.pbPositions.length > 0)
     ? { x: dp.vx || State.ship.vel.x, y: dp.vy || State.ship.vel.y }
     : State.ship.vel;
@@ -1464,9 +1494,9 @@ function drawShip() {
     const ve  = w2s(dp.x + liveVel.x*0.6, dp.y + liveVel.y*0.6);
     const va  = Math.atan2(-(ve.y-sy), ve.x-sx);
     const ah  = 6;
-    mctx.strokeStyle='#ffaa00'; mctx.lineWidth=1.5;
+    mctx.strokeStyle=Pilot.colour; mctx.lineWidth=1.5;
     mctx.beginPath(); mctx.moveTo(sx,sy); mctx.lineTo(ve.x,ve.y); mctx.stroke();
-    mctx.fillStyle='#ffaa00';
+    mctx.fillStyle=Pilot.colour;
     mctx.beginPath(); mctx.moveTo(ve.x,ve.y);
     mctx.lineTo(ve.x-ah*Math.cos(va-0.45),ve.y+ah*Math.sin(va-0.45));
     mctx.lineTo(ve.x-ah*Math.cos(va+0.45),ve.y+ah*Math.sin(va+0.45));
@@ -1479,15 +1509,14 @@ function drawShip() {
   }
 
   if (UI.overlays.labels) {
-    mctx.fillStyle='#33aa33'; mctx.font='9px Courier New';
-    mctx.fillText('HULL-01',sx+13,sy-4);
-    mctx.fillStyle='#1a5a1a';
+    mctx.fillStyle=Pilot.colour; mctx.font='9px Courier New';
+    mctx.fillText(Pilot.name||'HULL-01',sx+13,sy-4);
+    mctx.fillStyle=Pilot.colour+'88';
     mctx.fillText(`[${dp.x.toFixed(1)}, ${dp.y.toFixed(1)}]`,sx+13,sy+7);
   }
 
   // ── Opponent ship (multiplayer only) ──────────────────────
   if (State.opponent) {
-    // During playback use the trail position, otherwise use static State.opponent
     const oppPos = (UI.playing && UI.oppTrail.length > 0)
       ? UI.oppTrail[Math.min(UI.pbStep, UI.oppTrail.length-1)]
       : { x: State.opponent.pos.x, y: State.opponent.pos.y,
@@ -1501,37 +1530,37 @@ function drawShip() {
     mctx.beginPath();
     mctx.moveTo(0,-10); mctx.lineTo(-7,7*0.8); mctx.lineTo(7,7*0.8);
     mctx.closePath();
-    mctx.fillStyle='#001a2a'; mctx.fill();
-    mctx.strokeStyle='#00aaff'; mctx.lineWidth=1.5; mctx.stroke();
+    mctx.fillStyle='#001a00'; mctx.fill();
+    mctx.strokeStyle=Pilot.oppColour; mctx.lineWidth=1.5; mctx.stroke();
     mctx.beginPath(); mctx.arc(0,-10,2,0,Math.PI*2);
-    mctx.fillStyle='#00ccff'; mctx.fill();
+    mctx.fillStyle=Pilot.oppColour; mctx.fill();
     mctx.restore();
 
     if (UI.overlays.labels) {
-      mctx.fillStyle='#00aaff'; mctx.font='9px Courier New';
-      mctx.fillText('HULL-02',os.x+13,os.y-4);
-      mctx.fillStyle='#1a3a5a';
+      mctx.fillStyle=Pilot.oppColour; mctx.font='9px Courier New';
+      mctx.fillText(Pilot.oppName||'HULL-02',os.x+13,os.y-4);
+      mctx.fillStyle=Pilot.oppColour+'88';
       mctx.fillText(`[${oppPos.x.toFixed(1)}, ${oppPos.y.toFixed(1)}]`,os.x+13,os.y+7);
     }
 
-    // Opponent velocity arrow
+    // Opponent velocity arrow in their colour
     const oppVel = (UI.playing && UI.oppTrail.length > 0)
       ? { x: oppPos.vx || 0, y: oppPos.vy || 0 }
       : { x: State.opponent.vel.x, y: State.opponent.vel.y };
     const oppSpd = Math.hypot(oppVel.x, oppVel.y);
     if (UI.overlays.velArrow && oppSpd > 0.001) {
-      const ove  = w2s(oppPos.x + oppVel.x*0.6, oppPos.y + oppVel.y*0.6);
-      const ova  = Math.atan2(-(ove.y-os.y), ove.x-os.x);
-      const ah   = 6;
-      mctx.strokeStyle='#0088cc'; mctx.lineWidth=1.5;
+      const ove = w2s(oppPos.x + oppVel.x*0.6, oppPos.y + oppVel.y*0.6);
+      const ova = Math.atan2(-(ove.y-os.y), ove.x-os.x);
+      const ah  = 6;
+      mctx.strokeStyle=Pilot.oppColour; mctx.lineWidth=1.5;
       mctx.beginPath(); mctx.moveTo(os.x,os.y); mctx.lineTo(ove.x,ove.y); mctx.stroke();
-      mctx.fillStyle='#0088cc';
+      mctx.fillStyle=Pilot.oppColour;
       mctx.beginPath(); mctx.moveTo(ove.x,ove.y);
       mctx.lineTo(ove.x-ah*Math.cos(ova-0.45),ove.y+ah*Math.sin(ova-0.45));
       mctx.lineTo(ove.x-ah*Math.cos(ova+0.45),ove.y+ah*Math.sin(ova+0.45));
       mctx.closePath(); mctx.fill();
       if (UI.overlays.labels) {
-        mctx.fillStyle='#0088cc'; mctx.font='9px Courier New';
+        mctx.fillStyle=Pilot.oppColour; mctx.font='9px Courier New';
         mctx.fillText(`${oppSpd.toFixed(2)} km/s`,
           (os.x+ove.x)/2+5, (os.y+ove.y)/2-4);
       }
@@ -2252,6 +2281,7 @@ function launchGame(overrideConfig) {
   document.getElementById('turn-num').textContent='001';
   document.getElementById('phase').textContent='PLANNING';
   document.getElementById('btn-exec').disabled=false;
+  document.getElementById('pilot-display').textContent = Pilot.name || 'HULL-01';
   updateSelPanel(); renderSeq();
   document.getElementById('menu-overlay').classList.add('hidden');
   setStatus(`MISSION LAUNCHED — SEED: ${State.courseConfig.seed} · ${State.rocks.length} ROCKS · NEXT: BETA`);
@@ -2400,6 +2430,35 @@ document.getElementById('modal').addEventListener('keydown',e=>{
 });
 
 
+// ── PILOT ────────────────────────────────────────────────────
+//
+//  Stores the local player's chosen callsign and ship colour.
+//  Written to Firebase when creating/joining a room.
+//  The opponent's pilot data is read from Firebase and stored here too.
+//
+const Pilot = {
+  name:      'PILOT',
+  colour:    '#00ff88',
+  oppName:   'OPPONENT',
+  oppColour: '#00aaff',
+};
+
+// Enforce uppercase on name input
+document.getElementById('pilot-name').addEventListener('input', function() {
+  this.value = this.value.toUpperCase();
+  Pilot.name = this.value || 'PILOT';
+});
+
+// Colour swatch selection
+document.querySelectorAll('.colour-swatch').forEach(el => {
+  el.addEventListener('click', () => {
+    document.querySelectorAll('.colour-swatch').forEach(s => s.classList.remove('active'));
+    el.classList.add('active');
+    Pilot.colour = el.dataset.colour;
+  });
+});
+
+
 // ═══════════════════════════════════════════════════════════
 //  LOBBY SYSTEM
 //
@@ -2478,7 +2537,7 @@ document.getElementById('btn-create-room').addEventListener('click', async () =>
 
   // Write initial room state to Firebase
   await set(Lobby.roomRef, {
-    players: { alpha: { uid, name: `HULL-${uid.slice(0,4).toUpperCase()}` } },
+    players: { alpha: { uid, name: Pilot.name||'PILOT', colour: Pilot.colour } },
     phase: 'lobby',
   });
 
@@ -2519,7 +2578,7 @@ document.getElementById('btn-join-room').addEventListener('click', async () => {
   Lobby.roomRef = roomRef;
 
   await update(ref(db, `games/${code}/players`), {
-    beta: { uid, name: `HULL-${uid.slice(0,4).toUpperCase()}` }
+    beta: { uid, name: Pilot.name||'PILOT', colour: Pilot.colour }
   });
 
   showRoomDisplay(code);
@@ -2559,13 +2618,24 @@ function watchRoom() {
     const alpha   = players.alpha;
     const beta    = players.beta;
 
-    // Update player slot displays
+    // Update player slot displays with name and colour
     const slotA = document.getElementById('slot-alpha');
     const slotB = document.getElementById('slot-beta');
-    slotA.textContent = alpha ? `ALPHA — ${alpha.name}` : 'ALPHA — WAITING';
-    slotA.className   = `lobby-player-slot ${alpha ? 'filled' : ''}`;
-    slotB.textContent = beta  ? `BETA  — ${beta.name}`  : 'BETA  — WAITING';
-    slotB.className   = `lobby-player-slot ${beta  ? 'filled' : ''}`;
+    slotA.textContent = alpha ? alpha.name : 'ALPHA — WAITING';
+    slotA.style.borderColor = alpha ? alpha.colour : '';
+    slotA.style.color       = alpha ? alpha.colour : '';
+    slotA.className = `lobby-player-slot ${alpha ? 'filled' : ''}`;
+    slotB.textContent = beta  ? beta.name  : 'BETA  — WAITING';
+    slotB.style.borderColor = beta  ? beta.colour  : '';
+    slotB.style.color       = beta  ? beta.colour  : '';
+    slotB.className = `lobby-player-slot ${beta  ? 'filled' : ''}`;
+
+    // Store opponent pilot data locally
+    const oppSlotData = Lobby.mySlot === 'alpha' ? beta : alpha;
+    if (oppSlotData) {
+      Pilot.oppName   = oppSlotData.name   || 'OPPONENT';
+      Pilot.oppColour = oppSlotData.colour || '#00aaff';
+    }
 
     // Both players present — unlock proceed
     const bothReady = alpha && beta;
