@@ -2768,21 +2768,15 @@ State.rocks = generateRocks(State.courseConfig);
 // A single rAF fires before the browser has finished laying out flex containers,
 // so clientWidth/clientHeight come back as 0 and the canvas never sizes correctly.
 // The double rAF guarantees at least one full layout pass has completed.
-requestAnimationFrame(() => requestAnimationFrame(() => {
-  // Guard against layout not being ready — retry until viewport has real dimensions
-  function tryInit() {
-    const vp = document.getElementById('viewport');
-    if (!vp.clientWidth || !vp.clientHeight) {
-      requestAnimationFrame(tryInit);
-      return;
-    }
-    resize();
-    updateSelPanel();
-    loop();
-    setStatus('SYSTEM READY — CONFIGURE YOUR MISSION AND PRESS LAUNCH');
-  }
-  tryInit();
-}));
+// Initialise after the window load event — fires after all resources are loaded
+// and the browser has completed initial layout. More reliable than rAF for
+// ensuring clientWidth/clientHeight are non-zero on first paint.
+window.addEventListener('load', () => {
+  resize();
+  updateSelPanel();
+  loop();
+  setStatus('SYSTEM READY — CONFIGURE YOUR MISSION AND PRESS LAUNCH');
+});
 </script>
 </body>
 </html>
