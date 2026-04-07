@@ -2764,15 +2764,25 @@ function loop() { render(); requestAnimationFrame(loop); }
 // The player will regenerate with their own settings on launch.
 State.rocks = generateRocks(State.courseConfig);
 
-// Defer the first resize to after the browser has finished layout.
-// Without this, clientWidth/clientHeight can be 0 on first paint,
-// which produces a blank canvas that only recovers when DevTools forces a reflow.
-requestAnimationFrame(() => {
-  resize();
-  updateSelPanel();
-  loop();
-  setStatus('SYSTEM READY — CONFIGURE YOUR MISSION AND PRESS LAUNCH');
-});
+// Defer initialisation until after two paint cycles.
+// A single rAF fires before the browser has finished laying out flex containers,
+// so clientWidth/clientHeight come back as 0 and the canvas never sizes correctly.
+// The double rAF guarantees at least one full layout pass has completed.
+requestAnimationFrame(() => requestAnimationFrame(() => {
+  // Guard against layout not being ready — retry until viewport has real dimensions
+  function tryInit() {
+    const vp = document.getElementById('viewport');
+    if (!vp.clientWidth || !vp.clientHeight) {
+      requestAnimationFrame(tryInit);
+      return;
+    }
+    resize();
+    updateSelPanel();
+    loop();
+    setStatus('SYSTEM READY — CONFIGURE YOUR MISSION AND PRESS LAUNCH');
+  }
+  tryInit();
+}));
 </script>
 </body>
 </html>
