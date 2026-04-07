@@ -2776,6 +2776,9 @@ window.addEventListener('load', () => {
   updateSelPanel();
   loop();
   setStatus('SYSTEM READY — CONFIGURE YOUR MISSION AND PRESS LAUNCH');
+  // Belt-and-suspenders: re-run resize after 200ms in case the
+  // lobby overlay was still affecting layout at load time.
+  setTimeout(resize, 200);
 });
 </script>
 </body>
