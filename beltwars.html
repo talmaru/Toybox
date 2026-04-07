@@ -1024,6 +1024,7 @@ function simulate(startPos, startVel, startAngle, startAngVel, cmds, startCheckI
     const speed = Math.hypot(vel.x, vel.y);
     const substeps = speed > 20 ? 4 : speed > 10 ? 2 : 1;
     const subDT = CONFIG.DT / substeps;
+    let collided = false;  // declared outside substep loop so break can see it
 
     for (let sub = 0; sub < substeps; sub++) {
       angle += angVel * subDT;
@@ -1033,11 +1034,10 @@ function simulate(startPos, startVel, startAngle, startAngVel, cmds, startCheckI
 
     // ── Rock collision detection ─────────────────────────────
     // Two-phase: broad (circle) then narrow (polygon sweep).
-    // See Collision.* functions below for the math.
+    // On collision: reflect velocity off surface normal, reduce by 50%,
+    // and set a flag to cancel remaining commands for this turn.
     for (const rock of rocks) {
-      // Broad phase: find closest point on movement segment to rock center.
-      // Checking just the endpoints misses cases where the ship travels entirely
-      // through a rock in one step (tunnelling at high velocity).
+      // Broad phase
       const segDx = pos.x - prevX, segDy = pos.y - prevY;
       const segLen2 = segDx*segDx + segDy*segDy;
       const tClosest = segLen2 > 0
@@ -1047,28 +1047,39 @@ function simulate(startPos, startVel, startAngle, startAngVel, cmds, startCheckI
       const closestY = prevY + tClosest*segDy;
       if (Math.hypot(closestX - rock.x, closestY - rock.y) > rock.r * 1.5) continue;
 
-      // Narrow phase A: ship is already inside the polygon (e.g. stuck from prev turn)
+      // Narrow phase A: already inside polygon — push out and bounce
       if (pointInPoly(pos.x, pos.y, rock.verts)) {
         const pushOut = findNearestEdgePushOut(pos.x, pos.y, rock.verts);
         pos.x += pushOut.nx * (pushOut.dist + 0.15);
         pos.y += pushOut.ny * (pushOut.dist + 0.15);
-        vel.x = 0; vel.y = 0;
+        // Reflect velocity off surface normal and halve magnitude
+        const dot = vel.x * pushOut.nx + vel.y * pushOut.ny;
+        vel.x = (vel.x - 2 * dot * pushOut.nx) * 0.5;
+        vel.y = (vel.y - 2 * dot * pushOut.ny) * 0.5;
+        collided = true;
         break;
       }
 
-      // Narrow phase B: movement segment crosses a polygon edge (tunnelling prevention)
+      // Narrow phase B: sweep hit — place at contact point and bounce
       const hit = sweepPointPoly(prevX, prevY, pos.x, pos.y, rock.verts);
       if (hit) {
         pos.x = prevX + hit.t * (pos.x - prevX) + hit.nx * 0.15;
         pos.y = prevY + hit.t * (pos.y - prevY) + hit.ny * 0.15;
-        vel.x = 0; vel.y = 0;
+        // Reflect velocity off surface normal and halve magnitude
+        const dot = vel.x * hit.nx + vel.y * hit.ny;
+        vel.x = (vel.x - 2 * dot * hit.nx) * 0.5;
+        vel.y = (vel.y - 2 * dot * hit.ny) * 0.5;
+        collided = true;
         break;
       }
     }
     } // end substep loop
 
-    // Record this timestep's state in the trail (once per main step, not per substep)
+    // Record trail entry
     trail.push({ x:pos.x, y:pos.y, angle, vx:vel.x, vy:vel.y, angVel });
+
+    // Collision cancels remaining commands for this turn — ship coasts from here
+    if (collided) break;
 
     // ── Checkpoint detection ─────────────────────────────────
     // Check if the ship entered the gate radius of the next checkpoint.
