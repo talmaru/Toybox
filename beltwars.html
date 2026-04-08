@@ -413,8 +413,8 @@ const FIREBASE_CONFIG = {
       </div>
       <!-- Mode selection -->
       <div class="lobby-mode-btns">
-        <button class="lobby-mode-btn active" id="btn-mode-solo">⬡ SOLO</button>
-        <button class="lobby-mode-btn"        id="btn-mode-multi">⇄ MULTIPLAYER</button>
+        <button class="lobby-mode-btn" id="btn-mode-solo">⬡ SOLO</button>
+        <button class="lobby-mode-btn" id="btn-mode-multi">⇄ MULTIPLAYER</button>
       </div>
 
       <!-- Multiplayer sub-panel — hidden until mode is selected -->
@@ -793,7 +793,7 @@ const SHIP_CLASSES = {
     mainThrust:  80000,
     retroThrust: 40000,
     sideThrust:  20000,
-    maxTorque:   150,
+    maxTorque:   39,   // (π/2 * 25000) / 1000 → ~90° max rotation per turn
     description: 'Fast and nimble. Low mass makes it extremely responsive but hard to stop.',
   },
   frigate: {
@@ -805,7 +805,7 @@ const SHIP_CLASSES = {
     mainThrust:  50000,
     retroThrust: 25000,
     sideThrust:  12500,
-    maxTorque:   100,
+    maxTorque:   39,   // (π/4 * 50000) / 1000 → ~45° max rotation per turn
     description: 'Balanced all-rounder. The default hull.',
   },
   hauler: {
@@ -817,7 +817,7 @@ const SHIP_CLASSES = {
     mainThrust:  120000,
     retroThrust: 30000,
     sideThrust:  8000,
-    maxTorque:   50,
+    maxTorque:   58,   // (0.384 * 150000) / 1000 → ~22° max rotation per turn
     description: 'Raw power, terrible handling. Commits to every maneuver three turns early.',
   },
 };
@@ -1586,14 +1586,20 @@ function render() {
 function drawGrid(W, H) {
   const shipX = W/2 + UI.panOffset.x;
   const shipY = H/2 + UI.panOffset.y;
+  const center = w2s(0, 0);
+  const hardR  = (State.courseConfig.radius || 80) * 1.2 * UI.scale;
+
+  // Clip all grid drawing to the hard boundary circle
+  mctx.save();
+  mctx.beginPath();
+  mctx.arc(center.x, center.y, hardR, 0, Math.PI*2);
+  mctx.clip();
 
   if (UI.overlays.grid) {
     mctx.strokeStyle = '#001600'; mctx.lineWidth = 1;
-    // Offset grid lines so they always pass through the ship position
     const ox = shipX % UI.scale, oy = shipY % UI.scale;
     for (let x = ox; x < W; x += UI.scale) { mctx.beginPath(); mctx.moveTo(x,0); mctx.lineTo(x,H); mctx.stroke(); }
     for (let y = oy; y < H; y += UI.scale) { mctx.beginPath(); mctx.moveTo(0,y); mctx.lineTo(W,y); mctx.stroke(); }
-    // Brighter axis lines through ship center
     mctx.strokeStyle = '#002400';
     mctx.beginPath(); mctx.moveTo(shipX,0); mctx.lineTo(shipX,H); mctx.stroke();
     mctx.beginPath(); mctx.moveTo(0,shipY); mctx.lineTo(W,shipY); mctx.stroke();
@@ -1601,12 +1607,13 @@ function drawGrid(W, H) {
 
   if (UI.overlays.rings) {
     mctx.setLineDash([2,6]); mctx.strokeStyle = '#001e00';
-    // Range rings at 3, 6, 9, 12 km
     [3,6,9,12].forEach(r => {
       mctx.beginPath(); mctx.arc(shipX, shipY, r * UI.scale, 0, Math.PI*2); mctx.stroke();
     });
     mctx.setLineDash([]);
   }
+
+  mctx.restore(); // remove clip
 }
 
 // Arena boundary — two concentric circles based on course radius.
@@ -3115,6 +3122,7 @@ document.querySelectorAll('.class-btn').forEach(el => {
 // Colour swatch selection
 document.querySelectorAll('.colour-swatch').forEach(el => {
   el.addEventListener('click', () => {
+    document.querySelectorAll('.colour-swatch').forEach(s => s.classList.remove('active'));
     el.classList.add('active');
     Pilot.colour = el.dataset.colour;
   });
