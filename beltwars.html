@@ -436,10 +436,24 @@ const FIREBASE_CONFIG = {
           <div style="font-size:10px;letter-spacing:3px;margin-bottom:6px;">ROOM CODE</div>
           <div id="lobby-room-code">——————</div>
           <button id="btn-copy-code" style="margin-top:6px;padding:4px 12px;background:transparent;border:1px solid var(--grid);color:var(--text-dim);font-family:inherit;font-size:10px;letter-spacing:2px;cursor:pointer;" onclick="navigator.clipboard.writeText(document.getElementById('lobby-room-code').textContent).then(()=>{this.textContent='✓ COPIED';setTimeout(()=>this.textContent='⧉ COPY CODE',1500)})">⧉ COPY CODE</button>
-          <div style="font-size:10px;letter-spacing:2px;margin:8px 0 6px;color:var(--text-dim);">PLAYERS</div>
+          <div id="host-controls" style="display:none;">
+            <div style="font-size:10px;letter-spacing:2px;margin:8px 0 4px;color:var(--text-dim);">MAX PLAYERS</div>
+            <div id="player-count-btns" style="display:flex;gap:4px;margin-bottom:8px;">
+              <button class="class-btn" data-count="2" style="flex:1;font-size:10px;">2</button>
+              <button class="class-btn active" data-count="3" style="flex:1;font-size:10px;">3</button>
+              <button class="class-btn" data-count="4" style="flex:1;font-size:10px;">4</button>
+              <button class="class-btn" data-count="5" style="flex:1;font-size:10px;">5</button>
+              <button class="class-btn" data-count="6" style="flex:1;font-size:10px;">6</button>
+            </div>
+          </div>
+          <div style="font-size:10px;letter-spacing:2px;margin:0 0 6px;color:var(--text-dim);">PLAYERS</div>
           <div id="lobby-players">
             <div class="lobby-player-slot" id="slot-alpha">ALPHA — WAITING</div>
             <div class="lobby-player-slot" id="slot-beta"> BETA  — WAITING</div>
+            <div class="lobby-player-slot hidden" id="slot-gamma"> GAMMA — WAITING</div>
+            <div class="lobby-player-slot hidden" id="slot-delta"> DELTA — WAITING</div>
+            <div class="lobby-player-slot hidden" id="slot-epsilon">EPSILON — WAITING</div>
+            <div class="lobby-player-slot hidden" id="slot-zeta">  ZETA — WAITING</div>
           </div>
         </div>
       </div>
@@ -942,9 +956,10 @@ const State = {
   // Slot is determined after lobby — default to alpha for solo mode.
   ship: { pos:{x:0,y:80}, vel:{x:0,y:0}, angle:0, angVel:0 },
 
-  // Opponent ship — only populated in multiplayer.
-  // Driven by their trail during playback, static between turns.
-  opponent: null,  // null in solo | { pos, vel, angle, angVel } in multi
+  // Opponent ships — only populated in multiplayer.
+  // One entry per opponent: { pos, vel, angle, angVel }
+  // Empty in solo mode.
+  opponents: [],
 
   // The command queue for the current turn being planned.
   // Each entry is a command object: { type, track, startStep, stopStep, ... }
@@ -1020,9 +1035,9 @@ const UI = {
   // Rebuilt each frame. Not persisted. Format: [{sx, sy, step}]
   predDots: [],
 
-  // Opponent playback trail — populated during multiplayer turn resolution.
-  // Drives opponent ship rendering during the simultaneous playback phase.
-  oppTrail: [],
+  // Opponent playback trails — one per opponent, indexed to match State.opponents.
+  // Populated during multiplayer turn resolution, cleared after playback.
+  oppTrails: [],
 
   // Which viewport overlays are currently visible.
   overlays: {
@@ -1922,67 +1937,72 @@ function drawShip() {
     mctx.fillText(`[${dp.x.toFixed(1)}, ${dp.y.toFixed(1)}]`,sx+13,sy+7);
   }
 
-  // ── Opponent ship (multiplayer only) ──────────────────────
-  if (State.opponent) {
-    const oppPos = (UI.playing && UI.oppTrail.length > 0)
-      ? UI.oppTrail[Math.min(UI.pbStep, UI.oppTrail.length-1)]
-      : { x: State.opponent.pos.x, y: State.opponent.pos.y,
-          angle: State.opponent.angle };
+  // ── Opponent ships (multiplayer only) ────────────────────
+  State.opponents.forEach((opp, i) => {
+    const oppPilot  = Pilot.opponents[i] || {};
+    const oppColour = oppPilot.colour    || '#00aaff';
+    const oppName   = oppPilot.name      || `HULL-0${i+2}`;
+    const oppCls    = SHIP_CLASSES[oppPilot.shipClass] || SHIP_CLASSES.frigate;
+
+    // During playback use the trail for this opponent, else use live state
+    const trail   = UI.oppTrails[i] || [];
+    const oppPos  = (UI.playing && trail.length > 0)
+      ? trail[Math.min(UI.pbStep, trail.length-1)]
+      : { x: opp.pos.x, y: opp.pos.y, angle: opp.angle };
 
     const os = w2s(oppPos.x, oppPos.y);
 
-    // Opponent collision bubble — sized to their hull class
-    const oppClass   = SHIP_CLASSES[Pilot.oppClass] || SHIP_CLASSES.frigate;
-    const oppBubbleR = oppClass.radius * UI.scale;
+    // Collision bubble
+    const oppBubbleR = oppCls.radius * UI.scale;
     mctx.beginPath(); mctx.arc(os.x, os.y, oppBubbleR, 0, Math.PI*2);
-    mctx.strokeStyle = Pilot.oppColour + '55'; mctx.lineWidth = 1.5;
+    mctx.strokeStyle = oppColour + '55'; mctx.lineWidth = 1.5;
     mctx.stroke();
 
+    // Triangle
     const relAngle = (oppPos.angle || 0) - (currentDrawPos().angle || 0);
     mctx.save();
     mctx.translate(os.x, os.y);
     mctx.rotate(-relAngle);
     mctx.beginPath();
-    mctx.moveTo(0,               -oppBubbleR);
-    mctx.lineTo(-oppBubbleR * 0.866,  oppBubbleR * 0.5);
-    mctx.lineTo( oppBubbleR * 0.866,  oppBubbleR * 0.5);
+    mctx.moveTo(0,                 -oppBubbleR);
+    mctx.lineTo(-oppBubbleR*0.866,  oppBubbleR*0.5);
+    mctx.lineTo( oppBubbleR*0.866,  oppBubbleR*0.5);
     mctx.closePath();
     mctx.fillStyle='#001a00'; mctx.fill();
-    mctx.strokeStyle=Pilot.oppColour; mctx.lineWidth=1.5; mctx.stroke();
+    mctx.strokeStyle=oppColour; mctx.lineWidth=1.5; mctx.stroke();
     mctx.beginPath(); mctx.arc(0, -oppBubbleR, 2, 0, Math.PI*2);
-    mctx.fillStyle=Pilot.oppColour; mctx.fill();
+    mctx.fillStyle=oppColour; mctx.fill();
     mctx.restore();
 
     if (UI.overlays.labels) {
-      mctx.fillStyle=Pilot.oppColour; mctx.font='9px Courier New';
-      mctx.fillText(Pilot.oppName||'HULL-02',os.x+13,os.y-4);
-      mctx.fillStyle=Pilot.oppColour+'88';
-      mctx.fillText(`[${oppPos.x.toFixed(1)}, ${oppPos.y.toFixed(1)}]`,os.x+13,os.y+7);
+      mctx.fillStyle=oppColour; mctx.font='9px Courier New';
+      mctx.fillText(oppName, os.x+13, os.y-4);
+      mctx.fillStyle=oppColour+'88';
+      mctx.fillText(`[${oppPos.x.toFixed(1)}, ${oppPos.y.toFixed(1)}]`, os.x+13, os.y+7);
     }
 
-    // Opponent velocity arrow in their colour
-    const oppVel = (UI.playing && UI.oppTrail.length > 0)
+    // Velocity arrow
+    const oppVel = (UI.playing && trail.length > 0)
       ? { x: oppPos.vx || 0, y: oppPos.vy || 0 }
-      : { x: State.opponent.vel.x, y: State.opponent.vel.y };
+      : { x: opp.vel.x, y: opp.vel.y };
     const oppSpd = Math.hypot(oppVel.x, oppVel.y);
     if (UI.overlays.velArrow && oppSpd > 0.001) {
       const ove = w2s(oppPos.x + oppVel.x*0.6, oppPos.y + oppVel.y*0.6);
       const ova = Math.atan2(-(ove.y-os.y), ove.x-os.x);
       const ah  = 6;
-      mctx.strokeStyle=Pilot.oppColour; mctx.lineWidth=1.5;
+      mctx.strokeStyle=oppColour; mctx.lineWidth=1.5;
       mctx.beginPath(); mctx.moveTo(os.x,os.y); mctx.lineTo(ove.x,ove.y); mctx.stroke();
-      mctx.fillStyle=Pilot.oppColour;
+      mctx.fillStyle=oppColour;
       mctx.beginPath(); mctx.moveTo(ove.x,ove.y);
       mctx.lineTo(ove.x-ah*Math.cos(ova-0.45),ove.y+ah*Math.sin(ova-0.45));
       mctx.lineTo(ove.x-ah*Math.cos(ova+0.45),ove.y+ah*Math.sin(ova+0.45));
       mctx.closePath(); mctx.fill();
       if (UI.overlays.labels) {
-        mctx.fillStyle=Pilot.oppColour; mctx.font='9px Courier New';
-        mctx.fillText(`${oppSpd.toFixed(2)} km/s`,
-          (os.x+ove.x)/2+5, (os.y+ove.y)/2-4);
+        mctx.fillStyle=oppColour; mctx.font='9px Courier New';
+        mctx.fillText(`${oppSpd.toFixed(2)} km/s`, (os.x+ove.x)/2+5, (os.y+ove.y)/2-4);
       }
     }
-  }
+  });
 } // end drawShip
 
 // Pan indicator — shown in bottom-left when the view is offset from the ship.
@@ -2387,9 +2407,9 @@ function serializeCmd(c) {
 // myResult    — simulate() result for this client's ship
 // oppResult   — simulate() result for opponent's ship (null in solo)
 // onComplete  — called when playback finishes
-function playbackTurn(myResult, oppResult, onComplete) {
+function playbackTurn(myResult, oppTrails, onComplete) {
   UI.pbPositions = myResult.trail;
-  UI.oppTrail    = oppResult ? (oppResult.trail || []) : [];
+  UI.oppTrails   = Array.isArray(oppTrails) ? oppTrails : [];
   UI.pbStep      = 0;
   UI.playing     = true;
 
@@ -2404,7 +2424,7 @@ function playbackTurn(myResult, oppResult, onComplete) {
     if (UI.pbStep >= UI.pbPositions.length) {
       clearInterval(UI.pbTimer); UI.pbTimer = null;
       UI.playing = false;
-      UI.oppTrail = [];
+      UI.oppTrails = [];
       onComplete();
     }
   }, CONFIG.PLAYBACK_MS);
@@ -2427,47 +2447,181 @@ function commitTurn(myResult, logEntry) {
   document.getElementById('turn-num').textContent = String(State.turnNum).padStart(3,'0');
 }
 
-// Resolve a turn after both command sets are known.
-// Called by both solo (immediately) and multiplayer (after opponent commands arrive).
-function resolveTurn(myCommands, oppCommands, logEntry) {
-  document.getElementById('phase').textContent = 'SIMULATING';
+// ═══════════════════════════════════════════════════════════
+//  HOST-AUTHORITATIVE TURN RESOLUTION
+//
+//  Flow:
+//    1. All clients write commands to /turns/{n}/commands/{slot}
+//    2. Host watches commands/ — when all active slots have ready:true,
+//       runs simulate() for all ships, writes results to /turns/{n}/results
+//    3. All clients watch results/ — when it appears, play back and commit
+//
+//  Non-host clients never call simulate(). The host is the only source
+//  of truth for physics. This eliminates floating-point desync between
+//  clients and scales cleanly to N players.
+// ═══════════════════════════════════════════════════════════
 
-  const oppClass = SHIP_CLASSES[Pilot.oppClass] || SHIP_CLASSES.frigate;
+// Deserialise a trail from Firebase (arrays come back as objects)
+function deserializeTrail(raw) {
+  if (!raw) return [];
+  return Object.values(raw).map(p => ({
+    x: p.x, y: p.y, angle: p.angle,
+    vx: p.vx, vy: p.vy, angVel: p.angVel || 0,
+  }));
+}
 
-  // Build otherShips array for unified simulation
-  const otherShips = (State.opponent && oppCommands) ? [{
-    pos:    { ...State.opponent.pos },
-    vel:    { ...State.opponent.vel },
-    angle:  State.opponent.angle,
-    angVel: State.opponent.angVel,
-    mass:   oppClass.mass,
-    radius: oppClass.radius,
-    cmds:   oppCommands,
-  }] : [];
+// Host: watch commands node, resolve when all active slots ready
+function hostWatchCommands(turnNum, myCommands, logEntry) {
+  const { db, ref, onValue, set } = window.FB;
+  const cmdRef = ref(db, `games/${Lobby.roomId}/turns/${turnNum}/commands`);
 
-  const myResult = simulate(
-    State.ship.pos, State.ship.vel, State.ship.angle, State.ship.angVel,
-    myCommands, State.nextCheckIdx, State.rocks, otherShips
-  );
+  setStatus('COMMANDS SUBMITTED — WAITING FOR ALL PLAYERS...');
+  document.getElementById('phase').textContent = 'WAITING';
 
-  // Opponent trail comes back via otherTrails[0]
-  const oppTrail  = myResult.otherTrails?.[0] || [];
-  const oppFinal  = myResult.otherFinal?.[0]  || null;
+  const activeSlots = SLOTS.slice(0, Lobby.maxPlayers);
 
-  logEntry.trail       = myResult.trail;
-  logEntry.checkpoints = myResult.checkpointEvents;
-  logEntry.oppTrail    = oppTrail;
+  const unsub = onValue(cmdRef, async snapshot => {
+    if (!snapshot.exists()) return;
+    const data = snapshot.val();
 
-  playbackTurn(myResult, oppTrail ? { trail: oppTrail } : null, () => {
+    // Check all active slots have submitted
+    if (!activeSlots.every(s => data[s]?.ready)) return;
+    unsub();
+
+    document.getElementById('phase').textContent = 'SIMULATING';
+
+    // Collect all commands keyed by slot
+    const allCmds = {};
+    activeSlots.forEach(s => {
+      const raw = data[s].commands || {};
+      allCmds[s] = Object.values(raw);
+    });
+
+    // Build otherShips for all non-self slots in slot order
+    const otherSlots = activeSlots.filter(s => s !== Lobby.mySlot);
+    const otherShips = otherSlots.map((slot, i) => {
+      const opp    = State.opponents[i];
+      const pilot  = Pilot.opponents[i] || {};
+      const cls    = SHIP_CLASSES[pilot.shipClass] || SHIP_CLASSES.frigate;
+      return {
+        pos:    { ...opp.pos },
+        vel:    { ...opp.vel },
+        angle:  opp.angle,
+        angVel: opp.angVel,
+        mass:   cls.mass,
+        radius: cls.radius,
+        cmds:   allCmds[slot] || [],
+      };
+    });
+
+    const myResult = simulate(
+      State.ship.pos, State.ship.vel, State.ship.angle, State.ship.angVel,
+      allCmds[Lobby.mySlot] || [], State.nextCheckIdx, State.rocks, otherShips
+    );
+
+    // Serialise results for Firebase
+    const trails = { [Lobby.mySlot]: myResult.trail };
+    const finals = { [Lobby.mySlot]: {
+      pos: myResult.finalPos, vel: myResult.finalVel,
+      angle: myResult.finalAngle, angVel: myResult.finalAngVel,
+    }};
+    const checks = { [Lobby.mySlot]: myResult.checkpointEvents };
+
+    otherSlots.forEach((slot, i) => {
+      trails[slot] = myResult.otherTrails[i] || [];
+      finals[slot] = myResult.otherFinal[i]  || {};
+      checks[slot] = [];
+    });
+
+    // Write results — all clients read this and play back
+    await set(ref(db, `games/${Lobby.roomId}/turns/${turnNum}/results`), {
+      trails, finals, checks,
+    });
+
+    // Host plays back using the results it just wrote
+    logEntry.trail       = myResult.trail;
+    logEntry.checkpoints = myResult.checkpointEvents;
+    logEntry.oppTrails   = otherSlots.map((_, i) => myResult.otherTrails[i] || []);
+
+    applyTurnResult(myResult.trail, otherSlots.map((_, i) => myResult.otherTrails[i] || []),
+      myResult, myResult.otherFinal, logEntry);
+  });
+}
+
+// Non-host: watch results node, play back when host writes it
+function clientWatchResults(turnNum, logEntry) {
+  const { db, ref, onValue } = window.FB;
+  const resultsRef = ref(db, `games/${Lobby.roomId}/turns/${turnNum}/results`);
+
+  setStatus('COMMANDS SUBMITTED — WAITING FOR HOST...');
+  document.getElementById('phase').textContent = 'WAITING';
+
+  const unsub = onValue(resultsRef, snapshot => {
+    if (!snapshot.exists()) return;
+    unsub();
+
+    const data       = snapshot.val();
+    const mySlot     = Lobby.mySlot;
+    const myTrail    = deserializeTrail(data.trails?.[mySlot]);
+    const myFinal    = data.finals?.[mySlot];
+    const activeSlots = SLOTS.slice(0, Lobby.maxPlayers);
+    const otherSlots  = activeSlots.filter(s => s !== mySlot);
+    const oppTrails   = otherSlots.map(s => deserializeTrail(data.trails?.[s]));
+    const oppFinals   = otherSlots.map(s => data.finals?.[s]);
+
+    // Build a fake myResult from the host's data for commitTurn/playbackTurn
+    const myResult = {
+      trail:             myTrail,
+      finalPos:          myFinal?.pos    || State.ship.pos,
+      finalVel:          myFinal?.vel    || State.ship.vel,
+      finalAngle:        myFinal?.angle  ?? State.ship.angle,
+      finalAngVel:       myFinal?.angVel ?? State.ship.angVel,
+      checkpointEvents:  [],
+      finalCheckIdx:     State.nextCheckIdx,
+    };
+
+    // Checkpoint events aren't re-sent — detect from trail proximity
+    myTrail.forEach((p, step) => {
+      if (myResult.finalCheckIdx < CHECKPOINT_ORDER.length) {
+        const b = BEACONS[CHECKPOINT_ORDER[myResult.finalCheckIdx]];
+        if (b && Math.hypot(p.x - b.x, p.y - b.y) < State.courseConfig.gateRadius) {
+          myResult.checkpointEvents.push({ step, beaconIdx: CHECKPOINT_ORDER[myResult.finalCheckIdx], label: b.label });
+          myResult.finalCheckIdx++;
+        }
+      }
+    });
+
+    logEntry.trail       = myTrail;
+    logEntry.checkpoints = myResult.checkpointEvents;
+    logEntry.oppTrails   = oppTrails;
+
+    applyTurnResult(myTrail, oppTrails, myResult, oppFinals, logEntry);
+  });
+}
+
+// Apply a turn result — shared by both host and non-host after resolution
+function applyTurnResult(myTrail, oppTrails, myResult, oppFinals, logEntry) {
+  // Snapshot opponent start states now (before they get updated)
+  // so replay can restore them when rewinding to this turn
+  logEntry.oppStartStates = State.opponents.map(o => ({
+    pos:    { ...o.pos },
+    vel:    { ...o.vel },
+    angle:  o.angle,
+    angVel: o.angVel,
+  }));
+
+  playbackTurn(myResult, oppTrails, () => {
     commitTurn(myResult, logEntry);
 
-    // Update opponent's live position from unified simulation result
-    if (oppFinal && State.opponent) {
-      State.opponent.pos    = oppFinal.pos;
-      State.opponent.vel    = oppFinal.vel;
-      State.opponent.angle  = oppFinal.angle;
-      State.opponent.angVel = oppFinal.angVel;
-    }
+    // Update all opponent final states
+    (oppFinals || []).forEach((final, i) => {
+      if (final && State.opponents[i]) {
+        State.opponents[i].pos    = final.pos    || State.opponents[i].pos;
+        State.opponents[i].vel    = final.vel    || State.opponents[i].vel;
+        State.opponents[i].angle  = final.angle  ?? State.opponents[i].angle;
+        State.opponents[i].angVel = final.angVel ?? State.opponents[i].angVel;
+      }
+    });
 
     document.getElementById('phase').textContent = 'PLANNING';
     markPredictionDirty();
@@ -2479,40 +2633,9 @@ function resolveTurn(myCommands, oppCommands, logEntry) {
       showLapComplete();
     } else {
       execBtn.disabled = false;
-      setStatus(`TURN ${State.turnNum-1} COMPLETE — NEXT CHECKPOINT: ${BEACONS[CHECKPOINT_ORDER[State.nextCheckIdx]].label}`);
+      setStatus(`TURN ${State.turnNum-1} COMPLETE — NEXT: ${BEACONS[CHECKPOINT_ORDER[State.nextCheckIdx]].label}`);
     }
     updateSelPanel(); renderSeq();
-  });
-}
-
-// Watch the entire turn node and resolve when BOTH command slots are filled.
-// This is more robust than watching just the opponent slot — both clients
-// subscribe to the same path and trigger simultaneously when both have submitted.
-// It also avoids the race condition where client 2 could delete data before
-// client 1 even subscribes.
-function watchTurnComplete(turnNum, myCommands, logEntry) {
-  const { db, ref, onValue } = window.FB;
-  const turnRef = ref(db, `games/${Lobby.roomId}/turns/${turnNum}`);
-
-  setStatus('COMMANDS SUBMITTED — WAITING FOR OPPONENT...');
-  document.getElementById('phase').textContent = 'WAITING';
-
-  const unsub = onValue(turnRef, snapshot => {
-    if (!snapshot.exists()) return;
-    const data = snapshot.val();
-
-    // Wait until BOTH players have set ready:true before resolving.
-    // Checking the sentinel rather than the commands array because Firebase
-    // silently drops empty arrays — a player submitting with no commands
-    // would never satisfy a commands-based check.
-    if (!data.alpha?.ready || !data.beta?.ready) return;
-
-    unsub(); // unsubscribe before doing any work
-
-    const oppSlot    = Lobby.mySlot === 'alpha' ? 'beta' : 'alpha';
-    const raw        = data[oppSlot].commands || {};
-    const oppCommands = Object.values(raw);
-    resolveTurn(myCommands, oppCommands, logEntry);
   });
 }
 
@@ -2520,7 +2643,6 @@ document.getElementById('btn-exec').addEventListener('click', function() {
   if (UI.playing || State.lapComplete) return;
   this.disabled = true; UI.selCmd = null; updateSelPanel();
 
-  // Snapshot for replay log before commands are cleared
   const logEntry = {
     turn:       State.turnNum,
     startPos:   {...State.ship.pos},
@@ -2529,23 +2651,33 @@ document.getElementById('btn-exec').addEventListener('click', function() {
     startAngVel:State.ship.angVel,
     commands:   State.commands.map(c => ({...c})),
   };
-  const myCommands = State.commands.slice(); // copy for Firebase write
+  const myCommands = State.commands.slice();
 
   if (Lobby.mode === 'multi' && window.FB) {
-    // ── Multiplayer path ────────────────────────────────────
-    // Write commands to Firebase then wait for opponent
+    // Write commands to Firebase
     const { db, ref, set } = window.FB;
-    const turnRef = ref(db, `games/${Lobby.roomId}/turns/${State.turnNum}/${Lobby.mySlot}`);
-    set(turnRef, {
-      ready:    true,                           // sentinel — always written even if commands is empty
+    const cmdRef = ref(db, `games/${Lobby.roomId}/turns/${State.turnNum}/commands/${Lobby.mySlot}`);
+    set(cmdRef, {
+      ready:    true,
       commands: myCommands.map(serializeCmd),
     }).then(() => {
-      watchTurnComplete(State.turnNum, myCommands, logEntry);
+      if (Lobby.isHost) {
+        hostWatchCommands(State.turnNum, myCommands, logEntry);
+      } else {
+        clientWatchResults(State.turnNum, logEntry);
+      }
     });
   } else {
-    // ── Solo path ───────────────────────────────────────────
+    // Solo path — simulate immediately
     setStatus('EXECUTING TURN...');
-    resolveTurn(myCommands, null, logEntry);
+    const myResult = simulate(
+      State.ship.pos, State.ship.vel, State.ship.angle, State.ship.angVel,
+      myCommands, State.nextCheckIdx, State.rocks, []
+    );
+    logEntry.trail       = myResult.trail;
+    logEntry.checkpoints = myResult.checkpointEvents;
+    logEntry.oppTrails   = [];
+    applyTurnResult(myResult.trail, [], myResult, [], logEntry);
   }
 });
 
@@ -2578,18 +2710,29 @@ function playReplayTurn() {
   if (Replay.turnIdx>=State.replayLog.length) { endReplay(); return; }
   const entry=State.replayLog[Replay.turnIdx];
 
-  // Restore the ship to exactly where it was at the start of this turn
+  // Restore player ship to start of this turn
   State.ship.pos    ={...entry.startPos};
   State.ship.vel    ={...entry.startVel};
   State.ship.angle  =entry.startAngle;
   State.ship.angVel =entry.startAngVel;
 
-  // Set both trails — zoom/pan preserved so camera doesn't jump between turns
+  // Restore opponents to their positions at the start of this turn
+  // stored in entry.oppStartStates (added during applyTurnResult)
+  if (entry.oppStartStates) {
+    entry.oppStartStates.forEach((s, i) => {
+      if (State.opponents[i] && s) {
+        State.opponents[i].pos    = { ...s.pos };
+        State.opponents[i].vel    = { ...s.vel };
+        State.opponents[i].angle  = s.angle;
+        State.opponents[i].angVel = s.angVel;
+      }
+    });
+  }
+
   UI.pbPositions = entry.trail;
-  UI.oppTrail    = entry.oppTrail || [];
+  UI.oppTrails   = entry.oppTrails || [];
   UI.pbStep      = 0;
   UI.playing     = true;
-  // Note: UI.panOffset intentionally NOT reset — preserves player's zoom/pan state
 
   document.getElementById('replay-turn-disp').textContent=
     `TURN ${entry.turn} / ${State.replayLog.length}`;
@@ -2603,12 +2746,25 @@ function playReplayTurn() {
     renderSeq();
     if (UI.pbStep>=UI.pbPositions.length) {
       clearInterval(Replay.timer); Replay.timer=null;
+
+      // Advance player ship to end of turn
       const last=entry.trail[entry.trail.length-1];
       State.ship.pos   ={x:last.x,y:last.y};
       State.ship.vel   ={x:last.vx,y:last.vy};
       State.ship.angle = last.angle;
       State.ship.angVel= last.angVel||0;
-      UI.pbPositions=[]; UI.oppTrail=[]; UI.pbStep=0; UI.playing=false;
+
+      // Advance opponents to their end-of-turn positions
+      (entry.oppTrails||[]).forEach((trail, i) => {
+        if (!trail.length || !State.opponents[i]) return;
+        const ol = trail[trail.length-1];
+        State.opponents[i].pos    = { x: ol.x,  y: ol.y  };
+        State.opponents[i].vel    = { x: ol.vx, y: ol.vy };
+        State.opponents[i].angle  = ol.angle;
+        State.opponents[i].angVel = ol.angVel || 0;
+      });
+
+      UI.pbPositions=[]; UI.oppTrails=[]; UI.pbStep=0; UI.playing=false;
       Replay.turnIdx++;
       setTimeout(playReplayTurn,400);
     }
@@ -2732,12 +2888,14 @@ function launchGame(overrideConfig) {
   // Generate rocks — must happen after generateCourse so BEACONS are set
   State.rocks = generateRocks(State.courseConfig);
 
-  // In multiplayer, initialise opponent at the other slot's start position
+  // Initialise opponent ships from all non-self slots
   if (Lobby.mode === 'multi') {
-    const oppSlot = Lobby.mySlot === 'alpha' ? 'beta' : 'alpha';
-    State.opponent = startStateForSlot(oppSlot);
+    const players = Pilot.opponents; // set by watchRoom
+    State.opponents = SLOTS
+      .filter(s => s !== Lobby.mySlot && players.find(p => p.slot === s))
+      .map(s => startStateForSlot(s));
   } else {
-    State.opponent = null;
+    State.opponents = [];
   }
 
   // Reset all game and UI state
@@ -2909,12 +3067,13 @@ document.getElementById('modal').addEventListener('keydown',e=>{
 //  The opponent's pilot data is read from Firebase and stored here too.
 //
 const Pilot = {
-  name:      'PILOT',
-  colour:    '#00ff88',
-  shipClass: 'frigate',   // default class
-  oppName:   'OPPONENT',
-  oppColour: '#00aaff',
-  oppClass:  'frigate',
+  name:       'PILOT',
+  colour:     '#00ff88',
+  shipClass:  'frigate',
+  oppName:    'OPPONENT',   // legacy — first opponent
+  oppColour:  '#00aaff',
+  oppClass:   'frigate',
+  opponents:  [],           // all opponents: [{slot, name, colour, shipClass}]
 };
 
 // Apply a ship class to CONFIG so all physics and UI systems pick it up.
@@ -2984,14 +3143,17 @@ document.querySelectorAll('.colour-swatch').forEach(el => {
 // ═══════════════════════════════════════════════════════════
 
 // Lobby state — separate from game State to keep concerns clear
+const SLOTS = ['alpha','beta','gamma','delta','epsilon','zeta'];
+
 const Lobby = {
   mode:        'solo',
   roomId:      null,
-  mySlot:      null,
+  mySlot:      null,    // 'alpha' | 'beta' | 'gamma' | ...
   isHost:      false,
+  maxPlayers:  3,       // host sets this, written to Firebase
   roomRef:     null,
   unsubscribe: null,
-  launched:    false,   // guard against receiveCourseAndLaunch firing multiple times
+  launched:    false,
 };
 
 // Generate a readable 6-character room code from random bytes
@@ -3002,10 +3164,34 @@ function generateRoomCode() {
   return code;
 }
 
+// Player count selector — host-only, shown after creating a room
+document.querySelectorAll('#player-count-btns .class-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('#player-count-btns .class-btn')
+      .forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    Lobby.maxPlayers = parseInt(btn.dataset.count);
+    updateSlotVisibility();
+    // Push updated maxPlayers to Firebase so joiners know room capacity
+    if (Lobby.isHost && window.FB) {
+      const { db, ref, update } = window.FB;
+      update(ref(db, `games/${Lobby.roomId}`), { maxPlayers: Lobby.maxPlayers });
+    }
+  });
+});
+
+// Show/hide slot rows based on maxPlayers
+function updateSlotVisibility() {
+  SLOTS.forEach((slot, i) => {
+    const el = document.getElementById(`slot-${slot}`);
+    if (el) el.classList.toggle('hidden', i >= Lobby.maxPlayers);
+  });
+}
+
 function lobbySetStatus(msg, type = '') {
   const el = document.getElementById('lobby-status');
   el.textContent = msg;
-  el.className = type; // '' | 'ok' | 'error'
+  el.className = type;
 }
 
 // ── Mode selection ───────────────────────────────────────────
@@ -3040,16 +3226,18 @@ document.getElementById('btn-create-room').addEventListener('click', async () =>
 
   // Write initial room state to Firebase
   await set(Lobby.roomRef, {
-    players: { alpha: { uid, name: Pilot.name||'PILOT', colour: Pilot.colour, shipClass: Pilot.shipClass } },
-    phase: 'lobby',
+    players:    { alpha: { uid, name: Pilot.name||'PILOT', colour: Pilot.colour, shipClass: Pilot.shipClass } },
+    phase:      'lobby',
+    maxPlayers: Lobby.maxPlayers,
   });
 
-  // Clean up room if this player closes the tab
-  // (Firebase onDisconnect runs server-side even if the client drops)
   const { onDisconnect } = await import("https://www.gstatic.com/firebasejs/12.11.0/firebase-database.js");
   onDisconnect(Lobby.roomRef).remove();
 
   showRoomDisplay(code);
+  // Host can change player count — show the selector
+  document.getElementById('host-controls').style.display = 'block';
+  updateSlotVisibility();
   watchRoom();
   lobbySetStatus(`ROOM CREATED — SHARE CODE: ${code}`, 'ok');
 });
@@ -3069,45 +3257,56 @@ document.getElementById('btn-join-room').addEventListener('click', async () => {
     lobbySetStatus(`ROOM ${code} NOT FOUND`, 'error'); return;
   }
 
-  const data = snapshot.val();
-  if (data.players?.beta) {
+  const data       = snapshot.val();
+  const maxPlayers = data.maxPlayers || 2;
+  const players    = data.players    || {};
+
+  // Find next available slot up to maxPlayers
+  const mySlot = SLOTS.slice(0, maxPlayers).find(s => !players[s]);
+  if (!mySlot) {
     lobbySetStatus('ROOM IS FULL', 'error'); return;
   }
 
-  // Join as beta player — check for name collision with alpha
-  Lobby.roomId  = code;
-  Lobby.mySlot  = 'beta';
-  Lobby.isHost  = false;
-  Lobby.roomRef = roomRef;
+  Lobby.roomId     = code;
+  Lobby.mySlot     = mySlot;
+  Lobby.isHost     = false;
+  Lobby.maxPlayers = maxPlayers;
+  Lobby.roomRef    = roomRef;
 
-  // Deduplicate name against existing alpha player
+  // Deduplicate name against all existing players
+  const existingNames  = Object.values(players).map(p => p.name);
+  const existingColours = Object.values(players).map(p => p.colour);
+
   let myName = Pilot.name || 'PILOT';
-  if (data.players?.alpha?.name === myName) {
-    myName = myName + '-2';
+  if (existingNames.includes(myName)) {
+    myName = myName + '-' + (mySlot === 'beta' ? '2' : SLOTS.indexOf(mySlot) + 1);
     Pilot.name = myName;
     document.getElementById('pilot-name').value = myName;
   }
 
-  // Deduplicate colour against existing alpha player
   const COLOURS = ['#00ff88','#00aaff','#ffaa00','#ff4444','#cc44ff','#ff8844','#44ffcc','#ffffff'];
   let myColour = Pilot.colour;
-  if (data.players?.alpha?.colour === myColour) {
+  if (existingColours.includes(myColour)) {
     const idx = COLOURS.indexOf(myColour);
-    myColour = COLOURS[(idx + 1) % COLOURS.length];
+    myColour = COLOURS.find((c, i) => i > idx && !existingColours.includes(c))
+              || COLOURS.find(c => !existingColours.includes(c))
+              || myColour;
     Pilot.colour = myColour;
-    // Update swatch selection visually
     document.querySelectorAll('.colour-swatch').forEach(s => {
       s.classList.toggle('active', s.dataset.colour === myColour);
     });
   }
 
   await update(ref(db, `games/${code}/players`), {
-    beta: { uid, name: myName, colour: myColour, shipClass: Pilot.shipClass }
+    [mySlot]: { uid, name: myName, colour: myColour, shipClass: Pilot.shipClass }
   });
 
   showRoomDisplay(code);
+  // Non-host: hide the player count selector
+  document.getElementById('player-count-btns').style.display = 'none';
+  updateSlotVisibility();
   watchRoom();
-  lobbySetStatus(`JOINED ROOM ${code}`, 'ok');
+  lobbySetStatus(`JOINED ROOM ${code} AS ${mySlot.toUpperCase()}`, 'ok');
 });
 
 // ── Show room display panel ──────────────────────────────────
@@ -3126,8 +3325,6 @@ function showRoomDisplay(code) {
 //
 function watchRoom() {
   const { onValue } = window.FB;
-
-  // Unsubscribe from any previous listener
   if (Lobby.unsubscribe) Lobby.unsubscribe();
 
   Lobby.unsubscribe = onValue(Lobby.roomRef, snapshot => {
@@ -3137,45 +3334,64 @@ function watchRoom() {
       return;
     }
 
-    const data    = snapshot.val();
-    const players = data.players || {};
-    const alpha   = players.alpha;
-    const beta    = players.beta;
+    const data       = snapshot.val();
+    const players    = data.players    || {};
+    const maxPlayers = data.maxPlayers || Lobby.maxPlayers || 2;
 
-    // Update player slot displays with name and colour
-    const slotA = document.getElementById('slot-alpha');
-    const slotB = document.getElementById('slot-beta');
-    slotA.textContent = alpha ? alpha.name : 'ALPHA — WAITING';
-    slotA.style.borderColor = alpha ? alpha.colour : '';
-    slotA.style.color       = alpha ? alpha.colour : '';
-    slotA.className = `lobby-player-slot ${alpha ? 'filled' : ''}`;
-    slotB.textContent = beta  ? beta.name  : 'BETA  — WAITING';
-    slotB.style.borderColor = beta  ? beta.colour  : '';
-    slotB.style.color       = beta  ? beta.colour  : '';
-    slotB.className = `lobby-player-slot ${beta  ? 'filled' : ''}`;
+    // Sync maxPlayers from Firebase (non-host picks this up when host changes it)
+    Lobby.maxPlayers = maxPlayers;
+    updateSlotVisibility();
 
-    // Store opponent pilot data locally
-    const oppSlotData = Lobby.mySlot === 'alpha' ? beta : alpha;
-    if (oppSlotData) {
-      Pilot.oppName   = oppSlotData.name      || 'OPPONENT';
-      Pilot.oppColour = oppSlotData.colour    || '#00aaff';
-      Pilot.oppClass  = oppSlotData.shipClass || 'frigate';
+    // Update all slot displays
+    SLOTS.forEach((slot, i) => {
+      const el = document.getElementById(`slot-${slot}`);
+      if (!el) return;
+      const p = players[slot];
+      if (i >= maxPlayers) { el.classList.add('hidden'); return; }
+      el.classList.remove('hidden');
+      el.textContent    = p ? `${slot.toUpperCase()} — ${p.name}` : `${slot.toUpperCase()} — WAITING`;
+      el.style.color    = p ? p.colour : '';
+      el.style.borderColor = p ? p.colour : '';
+      el.className      = `lobby-player-slot ${p ? 'filled' : ''}`;
+    });
+
+    // Store all opponent pilot data
+    const activeSlots = SLOTS.slice(0, maxPlayers);
+    Pilot.opponents = activeSlots
+      .filter(s => s !== Lobby.mySlot && players[s])
+      .map(s => ({
+        slot:      s,
+        name:      players[s].name      || 'PILOT',
+        colour:    players[s].colour    || '#00aaff',
+        shipClass: players[s].shipClass || 'frigate',
+      }));
+
+    // Legacy single-opponent fields for compatibility during step 2
+    const firstOpp = Pilot.opponents[0];
+    if (firstOpp) {
+      Pilot.oppName   = firstOpp.name;
+      Pilot.oppColour = firstOpp.colour;
+      Pilot.oppClass  = firstOpp.shipClass;
     }
 
-    // Both players present — unlock proceed
-    const bothReady = alpha && beta;
-    document.getElementById('btn-lobby-proceed').disabled = !bothReady;
-    if (bothReady) {
+    // Both players ready check — require all slots filled
+    const filledSlots  = activeSlots.filter(s => players[s]);
+    const allReady     = filledSlots.length >= 2; // at least 2 players to start
+    const roomFull     = filledSlots.length >= maxPlayers;
+    document.getElementById('btn-lobby-proceed').disabled = !allReady;
+
+    if (allReady) {
       if (Lobby.isHost) {
-        lobbySetStatus('BOTH PLAYERS READY — PROCEED TO CONFIGURE AND LAUNCH', 'ok');
+        const status = roomFull ? 'ROOM FULL — CONFIGURE AND LAUNCH' : `${filledSlots.length}/${maxPlayers} PLAYERS — CAN LAUNCH OR WAIT`;
+        lobbySetStatus(status, 'ok');
         document.getElementById('btn-lobby-proceed').textContent = '▶ CONFIGURE MISSION';
       } else {
-        lobbySetStatus('BOTH PLAYERS READY — WAITING FOR HOST TO LAUNCH', 'ok');
+        lobbySetStatus(`${filledSlots.length}/${maxPlayers} PLAYERS — WAITING FOR HOST`, 'ok');
         document.getElementById('btn-lobby-proceed').textContent = '▶ READY';
       }
     }
 
-    // If host pushed courseConfig, non-host client should launch
+    // Non-host: launch when host pushes playing phase
     if (data.phase === 'playing' && !Lobby.isHost) {
       receiveCourseAndLaunch(data.courseConfig);
     }
@@ -3237,15 +3453,25 @@ async function multiLaunch() {
     randomOrder: document.getElementById('btn-order-rnd').classList.contains('active'),
   };
 
-  // Read opponent data directly from Firebase before launching.
-  // Don't rely on watchRoom's onValue having fired — it's async and
-  // may not have updated Pilot.oppColour yet when we call startGameplay.
-  const snapshot = await get(ref(db, `games/${Lobby.roomId}/players/beta`));
-  if (snapshot.exists()) {
-    const beta = snapshot.val();
-    Pilot.oppName   = beta.name      || 'OPPONENT';
-    Pilot.oppColour = beta.colour    || '#00aaff';
-    Pilot.oppClass  = beta.shipClass || 'frigate';
+  // Read all opponent data from Firebase before launching
+  const playersSnap = await get(ref(db, `games/${Lobby.roomId}/players`));
+  if (playersSnap.exists()) {
+    const allPlayers = playersSnap.val();
+    Pilot.opponents = SLOTS
+      .filter(s => s !== Lobby.mySlot && allPlayers[s])
+      .map(s => ({
+        slot:      s,
+        name:      allPlayers[s].name      || 'PILOT',
+        colour:    allPlayers[s].colour    || '#00aaff',
+        shipClass: allPlayers[s].shipClass || 'frigate',
+      }));
+    // Legacy single opponent fields
+    const first = Pilot.opponents[0];
+    if (first) {
+      Pilot.oppName   = first.name;
+      Pilot.oppColour = first.colour;
+      Pilot.oppClass  = first.shipClass;
+    }
   }
 
   await update(ref(db, `games/${Lobby.roomId}`), {
