@@ -1112,29 +1112,76 @@ function currentDrawPos() {
 //  means a future moving obstacle field is trivially supported —
 //  just pass a different array each turn.
 // ═══════════════════════════════════════════════════════════
-function simulate(startPos, startVel, startAngle, startAngVel, cmds, startCheckIdx, rocks) {
+// ── Elastic circle-circle collision resolver ─────────────────
+// Resolves a collision between two ships in-place.
+// Uses proper elastic collision with mass weighting.
+// Returns true if a collision was resolved.
+function resolveShipCollision(s1, s2) {
+  const dx   = s1.pos.x - s2.pos.x;
+  const dy   = s1.pos.y - s2.pos.y;
+  const dist = Math.hypot(dx, dy);
+  const minD = s1.radius + s2.radius;
+  if (dist >= minD || dist < 0.001) return false;
+
+  const nx = dx/dist, ny = dy/dist;
+
+  // Push apart proportional to mass so heavier ship moves less
+  const overlap = minD - dist;
+  const mt = s1.mass + s2.mass;
+  s1.pos.x += nx * overlap * (s2.mass/mt);
+  s1.pos.y += ny * overlap * (s2.mass/mt);
+  s2.pos.x -= nx * overlap * (s1.mass/mt);
+  s2.pos.y -= ny * overlap * (s1.mass/mt);
+
+  // Relative velocity along normal
+  const dvx = s1.vel.x - s2.vel.x;
+  const dvy = s1.vel.y - s2.vel.y;
+  const dot  = dvx*nx + dvy*ny;
+  if (dot >= 0) return false; // already separating — don't double-resolve
+
+  // Elastic impulse
+  const impulse = 2 * dot / mt;
+  s1.vel.x -= impulse * s2.mass * nx;
+  s1.vel.y -= impulse * s2.mass * ny;
+  s2.vel.x += impulse * s1.mass * nx;
+  s2.vel.y += impulse * s1.mass * ny;
+
+  return true;
+}
+
+function simulate(startPos, startVel, startAngle, startAngVel, cmds, startCheckIdx, rocks,
+                  otherShips = []) {
+  // otherShips: array of { pos, vel, mass, radius, cmds, angle, angVel }
+  // Each is integrated in parallel with the primary ship and participates
+  // in collision detection. Their trails are returned alongside the main trail.
+
   // Local mutable copies — the originals are never modified
   let pos    = { ...startPos };
   let vel    = { ...startVel };
   let angle  = startAngle;
   let angVel = startAngVel || 0;
 
-  // Which checkpoint index to start tracking from.
-  // Always passed explicitly by the caller — no silent State reads.
-  let checkIdx = startCheckIdx !== undefined ? startCheckIdx : 0;
+  // Mutable copies of other ships
+  const others = otherShips.map(o => ({
+    pos:    { ...o.pos },
+    vel:    { ...o.vel },
+    angle:  o.angle  || 0,
+    angVel: o.angVel || 0,
+    mass:   o.mass   || CONFIG.SHIP_MASS,
+    radius: o.radius || CONFIG.SHIP_RADIUS,
+    cmds:   o.cmds   || [],
+    trail:  [{ x:o.pos.x, y:o.pos.y, angle:o.angle||0, vx:o.vel.x, vy:o.vel.y, angVel:o.angVel||0 }],
+  }));
 
-  // Trail: one entry per timestep. The first entry is the starting state.
-  // Each entry stores position, angle, and velocity so playback can
-  // render the velocity arrow moving live during execution.
+  let checkIdx = startCheckIdx !== undefined ? startCheckIdx : 0;
   let trail = [{ x:pos.x, y:pos.y, angle, vx:vel.x, vy:vel.y, angVel }];
   let checkpointEvents = [];
 
   for (let s = 0; s < CONFIG.STEPS; s++) {
 
-    // ── Apply commands active at this timestep ──────────────
+    // ── Apply commands for primary ship ─────────────────────
     for (const c of cmds) {
       if (s < c.startStep || s >= c.stopStep) continue;
-
       if (c.type === 'rotate') {
         const alpha = ((c.torque * 1000) / CONFIG.SHIP_MOI) * (c.cw ? -1 : 1);
         angVel += alpha * CONFIG.DT;
@@ -1143,20 +1190,34 @@ function simulate(startPos, startVel, startAngle, startAngVel, cmds, startCheckI
         if (!tr) continue;
         const wx = tr.lx * Math.cos(angle) - tr.ly * Math.sin(angle);
         const wy = tr.lx * Math.sin(angle) + tr.ly * Math.cos(angle);
-        const accel = c.newtons / CONFIG.SHIP_MASS;
-        vel.x += wx * accel * CONFIG.DT;
-        vel.y += wy * accel * CONFIG.DT;
+        vel.x += (wx * c.newtons / CONFIG.SHIP_MASS) * CONFIG.DT;
+        vel.y += (wy * c.newtons / CONFIG.SHIP_MASS) * CONFIG.DT;
+      }
+    }
+
+    // ── Apply commands for other ships ──────────────────────
+    for (const o of others) {
+      for (const c of o.cmds) {
+        if (s < c.startStep || s >= c.stopStep) continue;
+        if (c.type === 'rotate') {
+          const alpha = ((c.torque * 1000) / (CONFIG.SHIP_MOI * (o.mass / CONFIG.SHIP_MASS))) * (c.cw ? -1 : 1);
+          o.angVel += alpha * CONFIG.DT;
+        } else {
+          const tr = TRACKS.find(t => t.id === c.track);
+          if (!tr) continue;
+          const wx = tr.lx * Math.cos(o.angle) - tr.ly * Math.sin(o.angle);
+          const wy = tr.lx * Math.sin(o.angle) + tr.ly * Math.cos(o.angle);
+          o.vel.x += (wx * c.newtons / o.mass) * CONFIG.DT;
+          o.vel.y += (wy * c.newtons / o.mass) * CONFIG.DT;
+        }
       }
     }
 
     // ── Adaptive substeps ───────────────────────────────────
-    // At high velocity one step can skip over a small rock entirely.
-    // Substeps subdivide the movement so the sweep test has a smaller
-    // segment to check — critical for fast projectiles later.
     const speed = Math.hypot(vel.x, vel.y);
     const substeps = speed > 20 ? 4 : speed > 10 ? 2 : 1;
     const subDT = CONFIG.DT / substeps;
-    let collided = false;  // declared outside substep loop so break can see it
+    let collided = false;
 
     for (let sub = 0; sub < substeps; sub++) {
       angle += angVel * subDT;
@@ -1164,45 +1225,78 @@ function simulate(startPos, startVel, startAngle, startAngVel, cmds, startCheckI
       pos.x += vel.x * subDT;
       pos.y += vel.y * subDT;
 
-    // ── Rock collision detection ─────────────────────────────
-    // Two-phase: broad (circle) then narrow (polygon sweep).
-    // On collision: reflect velocity off surface normal, reduce by 50%,
-    // and set a flag to cancel remaining commands for this turn.
-    for (const rock of rocks) {
-      // Broad phase: closest point on segment to rock center within ship radius + rock radius
-      const segDx = pos.x - prevX, segDy = pos.y - prevY;
-      const segLen2 = segDx*segDx + segDy*segDy;
-      const tClosest = segLen2 > 0
-        ? Math.max(0, Math.min(1, ((rock.x-prevX)*segDx + (rock.y-prevY)*segDy) / segLen2))
-        : 0;
-      const closestX = prevX + tClosest*segDx;
-      const closestY = prevY + tClosest*segDy;
-      if (Math.hypot(closestX - rock.x, closestY - rock.y) > rock.r * 1.5 + CONFIG.SHIP_RADIUS) continue;
-
-      // Narrow phase A: ship circle overlaps polygon — push out and bounce
-      if (pointInPoly(pos.x, pos.y, rock.verts)) {
-        const pushOut = findNearestEdgePushOut(pos.x, pos.y, rock.verts);
-        pos.x += pushOut.nx * (pushOut.dist + CONFIG.SHIP_RADIUS + 0.15);
-        pos.y += pushOut.ny * (pushOut.dist + CONFIG.SHIP_RADIUS + 0.15);
-        const dot = vel.x * pushOut.nx + vel.y * pushOut.ny;
-        vel.x = (vel.x - 2 * dot * pushOut.nx) * 0.5;
-        vel.y = (vel.y - 2 * dot * pushOut.ny) * 0.5;
-        collided = true;
-        break;
+      // Integrate other ships
+      for (const o of others) {
+        o.angle += o.angVel * subDT;
+        o.pos.x += o.vel.x * subDT;
+        o.pos.y += o.vel.y * subDT;
       }
 
-      // Narrow phase B: sweep circle against polygon
-      const hit = sweepCirclePoly(prevX, prevY, pos.x, pos.y, CONFIG.SHIP_RADIUS, rock.verts);
-      if (hit) {
-        pos.x = prevX + hit.t * (pos.x - prevX) + hit.nx * (CONFIG.SHIP_RADIUS + 0.15);
-        pos.y = prevY + hit.t * (pos.y - prevY) + hit.ny * (CONFIG.SHIP_RADIUS + 0.15);
-        const dot = vel.x * hit.nx + vel.y * hit.ny;
-        vel.x = (vel.x - 2 * dot * hit.nx) * 0.5;
-        vel.y = (vel.y - 2 * dot * hit.ny) * 0.5;
-        collided = true;
-        break;
+      // ── Rock collision for primary ship ──────────────────
+      for (const rock of rocks) {
+        const segDx = pos.x - prevX, segDy = pos.y - prevY;
+        const segLen2 = segDx*segDx + segDy*segDy;
+        const tClosest = segLen2 > 0
+          ? Math.max(0, Math.min(1, ((rock.x-prevX)*segDx + (rock.y-prevY)*segDy) / segLen2))
+          : 0;
+        const closestX = prevX + tClosest*segDx;
+        const closestY = prevY + tClosest*segDy;
+        if (Math.hypot(closestX - rock.x, closestY - rock.y) > rock.r * 1.5 + CONFIG.SHIP_RADIUS) continue;
+
+        if (pointInPoly(pos.x, pos.y, rock.verts)) {
+          const pushOut = findNearestEdgePushOut(pos.x, pos.y, rock.verts);
+          pos.x += pushOut.nx * (pushOut.dist + CONFIG.SHIP_RADIUS + 0.15);
+          pos.y += pushOut.ny * (pushOut.dist + CONFIG.SHIP_RADIUS + 0.15);
+          const dot = vel.x * pushOut.nx + vel.y * pushOut.ny;
+          vel.x = (vel.x - 2 * dot * pushOut.nx) * 0.5;
+          vel.y = (vel.y - 2 * dot * pushOut.ny) * 0.5;
+          collided = true; break;
+        }
+        const hit = sweepCirclePoly(prevX, prevY, pos.x, pos.y, CONFIG.SHIP_RADIUS, rock.verts);
+        if (hit) {
+          pos.x = prevX + hit.t * (pos.x - prevX) + hit.nx * (CONFIG.SHIP_RADIUS + 0.15);
+          pos.y = prevY + hit.t * (pos.y - prevY) + hit.ny * (CONFIG.SHIP_RADIUS + 0.15);
+          const dot = vel.x * hit.nx + vel.y * hit.ny;
+          vel.x = (vel.x - 2 * dot * hit.nx) * 0.5;
+          vel.y = (vel.y - 2 * dot * hit.ny) * 0.5;
+          collided = true; break;
+        }
       }
-    }
+
+      // ── Rock collision for other ships ───────────────────
+      for (const o of others) {
+        for (const rock of rocks) {
+          if (pointInPoly(o.pos.x, o.pos.y, rock.verts)) {
+            const pushOut = findNearestEdgePushOut(o.pos.x, o.pos.y, rock.verts);
+            o.pos.x += pushOut.nx * (pushOut.dist + o.radius + 0.15);
+            o.pos.y += pushOut.ny * (pushOut.dist + o.radius + 0.15);
+            const dot = o.vel.x * pushOut.nx + o.vel.y * pushOut.ny;
+            o.vel.x = (o.vel.x - 2 * dot * pushOut.nx) * 0.5;
+            o.vel.y = (o.vel.y - 2 * dot * pushOut.ny) * 0.5;
+            break;
+          }
+          const oPrevX = o.pos.x - o.vel.x * subDT;
+          const oPrevY = o.pos.y - o.vel.y * subDT;
+          const hit = sweepCirclePoly(oPrevX, oPrevY, o.pos.x, o.pos.y, o.radius, rock.verts);
+          if (hit) {
+            o.pos.x = oPrevX + hit.t * (o.pos.x - oPrevX) + hit.nx * (o.radius + 0.15);
+            o.pos.y = oPrevY + hit.t * (o.pos.y - oPrevY) + hit.ny * (o.radius + 0.15);
+            const dot = o.vel.x * hit.nx + o.vel.y * hit.ny;
+            o.vel.x = (o.vel.x - 2 * dot * hit.nx) * 0.5;
+            o.vel.y = (o.vel.y - 2 * dot * hit.ny) * 0.5;
+            break;
+          }
+        }
+      }
+
+      // ── Ship-to-ship collision ───────────────────────────
+      const primaryShipState = {
+        pos: pos, vel: vel,
+        mass: CONFIG.SHIP_MASS, radius: CONFIG.SHIP_RADIUS
+      };
+      for (const o of others) {
+        resolveShipCollision(primaryShipState, o);
+      }
     } // end substep loop
 
     // ── Circular hard wall bounce ────────────────────────────
@@ -1219,15 +1313,31 @@ function simulate(startPos, startVel, startAngle, startAngVel, cmds, startCheckI
         collided = true;
       }
     }
+    // Hard wall for other ships too
+    for (const o of others) {
+      const od = Math.hypot(o.pos.x, o.pos.y);
+      if (od > hardR) {
+        const nx = o.pos.x/od, ny = o.pos.y/od;
+        o.pos.x = nx * (hardR - 0.1);
+        o.pos.y = ny * (hardR - 0.1);
+        const dot = o.vel.x*nx + o.vel.y*ny;
+        if (dot > 0) {
+          o.vel.x = (o.vel.x - 2*dot*nx) * 0.5;
+          o.vel.y = (o.vel.y - 2*dot*ny) * 0.5;
+        }
+      }
+    }
 
-    // Record trail entry
+    // Record trail entries
     trail.push({ x:pos.x, y:pos.y, angle, vx:vel.x, vy:vel.y, angVel });
+    for (const o of others) {
+      o.trail.push({ x:o.pos.x, y:o.pos.y, angle:o.angle, vx:o.vel.x, vy:o.vel.y, angVel:o.angVel });
+    }
 
-    // Collision cancels remaining commands for this turn — ship coasts from here
+    // Rock collision cancels remaining commands for primary ship
     if (collided) break;
 
     // ── Checkpoint detection ─────────────────────────────────
-    // Check if the ship entered the gate radius of the next checkpoint.
     if (checkIdx < CHECKPOINT_ORDER.length) {
       const b = BEACONS[CHECKPOINT_ORDER[checkIdx]];
       if (Math.hypot(pos.x - b.x, pos.y - b.y) < State.courseConfig.gateRadius) {
@@ -1249,6 +1359,8 @@ function simulate(startPos, startVel, startAngle, startAngVel, cmds, startCheckI
     finalAngVel: angVel,
     checkpointEvents,
     finalCheckIdx: checkIdx,
+    otherTrails: others.map(o => o.trail),
+    otherFinal:  others.map(o => ({ pos:{...o.pos}, vel:{...o.vel}, angle:o.angle, angVel:o.angVel })),
   };
 }
 
@@ -2277,7 +2389,7 @@ function serializeCmd(c) {
 // onComplete  — called when playback finishes
 function playbackTurn(myResult, oppResult, onComplete) {
   UI.pbPositions = myResult.trail;
-  UI.oppTrail    = oppResult ? oppResult.trail : [];
+  UI.oppTrail    = oppResult ? (oppResult.trail || []) : [];
   UI.pbStep      = 0;
   UI.playing     = true;
 
@@ -2320,35 +2432,41 @@ function commitTurn(myResult, logEntry) {
 function resolveTurn(myCommands, oppCommands, logEntry) {
   document.getElementById('phase').textContent = 'SIMULATING';
 
-  const myResult  = simulate(State.ship.pos, State.ship.vel, State.ship.angle,
-                              State.ship.angVel, myCommands, State.nextCheckIdx, State.rocks);
+  const oppClass = SHIP_CLASSES[Pilot.oppClass] || SHIP_CLASSES.frigate;
 
-  // Simulate opponent from their current position using their ship class
-  let oppResult = null;
-  if (State.opponent && oppCommands) {
-    // Temporarily apply opponent's class to CONFIG for their simulation
-    const myClass = Pilot.shipClass;
-    applyShipClass(Pilot.oppClass || 'frigate');
-    oppResult = simulate(State.opponent.pos, State.opponent.vel, State.opponent.angle,
-                State.opponent.angVel, oppCommands, State.nextCheckIdx, State.rocks);
-    // Restore player's class
-    applyShipClass(myClass);
-  }
+  // Build otherShips array for unified simulation
+  const otherShips = (State.opponent && oppCommands) ? [{
+    pos:    { ...State.opponent.pos },
+    vel:    { ...State.opponent.vel },
+    angle:  State.opponent.angle,
+    angVel: State.opponent.angVel,
+    mass:   oppClass.mass,
+    radius: oppClass.radius,
+    cmds:   oppCommands,
+  }] : [];
 
-  // Store both trails in the log entry so replay can show both ships
+  const myResult = simulate(
+    State.ship.pos, State.ship.vel, State.ship.angle, State.ship.angVel,
+    myCommands, State.nextCheckIdx, State.rocks, otherShips
+  );
+
+  // Opponent trail comes back via otherTrails[0]
+  const oppTrail  = myResult.otherTrails?.[0] || [];
+  const oppFinal  = myResult.otherFinal?.[0]  || null;
+
   logEntry.trail       = myResult.trail;
   logEntry.checkpoints = myResult.checkpointEvents;
-  logEntry.oppTrail    = oppResult ? oppResult.trail : [];
+  logEntry.oppTrail    = oppTrail;
 
-  playbackTurn(myResult, oppResult, () => {
+  playbackTurn(myResult, oppTrail ? { trail: oppTrail } : null, () => {
     commitTurn(myResult, logEntry);
 
-    // Update opponent's live position from their simulation result
-    if (oppResult && State.opponent) {
-      State.opponent.pos    = oppResult.finalPos;
-      State.opponent.vel    = oppResult.finalVel;
-      State.opponent.angle  = oppResult.finalAngle;
-      State.opponent.angVel = oppResult.finalAngVel;
+    // Update opponent's live position from unified simulation result
+    if (oppFinal && State.opponent) {
+      State.opponent.pos    = oppFinal.pos;
+      State.opponent.vel    = oppFinal.vel;
+      State.opponent.angle  = oppFinal.angle;
+      State.opponent.angVel = oppFinal.angVel;
     }
 
     document.getElementById('phase').textContent = 'PLANNING';
