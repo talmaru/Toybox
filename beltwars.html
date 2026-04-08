@@ -279,6 +279,13 @@ const FIREBASE_CONFIG = {
   }
   .colour-swatch:hover  { transform: scale(1.15); }
   .colour-swatch.active { border-color: var(--bright); transform: scale(1.15); }
+  .class-btn {
+    background: transparent; border: 1px solid var(--grid);
+    color: var(--text-dim); font-family: inherit; font-size: 10px;
+    letter-spacing: 2px; padding: 5px 4px; cursor: pointer; transition: all 0.1s;
+  }
+  .class-btn:hover  { border-color: var(--text); color: var(--text); }
+  .class-btn.active { border-color: var(--accent); color: var(--bright); }
   @keyframes pulse-dots {
     0%,100% { opacity: 1; } 50% { opacity: 0.2; }
   }
@@ -391,6 +398,17 @@ const FIREBASE_CONFIG = {
             <div class="colour-swatch" data-colour="#44ffcc" style="background:#44ffcc;" title="CYAN"></div>
             <div class="colour-swatch" data-colour="#ffffff" style="background:#ffffff;" title="WHITE"></div>
           </div>
+        </div>
+        <div class="lobby-row" style="margin-top:10px;">
+          <label>HULL CLASS</label>
+          <div style="display:flex;gap:6px;flex:1;">
+            <button class="class-btn" data-class="scout"   style="flex:1;">SCOUT</button>
+            <button class="class-btn active" data-class="frigate" style="flex:1;">FRIGATE</button>
+            <button class="class-btn" data-class="hauler"  style="flex:1;">HAULER</button>
+          </div>
+        </div>
+        <div id="class-desc" style="font-size:9px;color:var(--text-dim);letter-spacing:1px;margin-top:6px;padding:0 2px;">
+          Balanced all-rounder. The default hull.
         </div>
       </div>
       <!-- Mode selection -->
@@ -742,7 +760,53 @@ const CONFIG = {
   HANDLE_W:    7,     // hit zone width for resize handles
 };
 
-// ── TRACK DEFINITIONS ────────────────────────────────────────
+// ── SHIP CLASSES ─────────────────────────────────────────────
+//
+//  Each class defines the physical properties of a hull type.
+//  These values drive the physics simulation, collision radius,
+//  and the slider caps in the command sequencer UI.
+//
+//  thrust values in Newtons, torque in kN·m, mass in kg,
+//  moi (moment of inertia) in kg·m², radius in km.
+//
+const SHIP_CLASSES = {
+  scout: {
+    id:          'scout',
+    name:        'SCOUT',
+    mass:        5000,
+    moi:         25000,
+    radius:      0.3,
+    mainThrust:  80000,
+    retroThrust: 40000,
+    sideThrust:  20000,
+    maxTorque:   150,
+    description: 'Fast and nimble. Low mass makes it extremely responsive but hard to stop.',
+  },
+  frigate: {
+    id:          'frigate',
+    name:        'FRIGATE',
+    mass:        10000,
+    moi:         50000,
+    radius:      0.5,
+    mainThrust:  50000,
+    retroThrust: 25000,
+    sideThrust:  12500,
+    maxTorque:   100,
+    description: 'Balanced all-rounder. The default hull.',
+  },
+  hauler: {
+    id:          'hauler',
+    name:        'HAULER',
+    mass:        25000,
+    moi:         150000,
+    radius:      0.8,
+    mainThrust:  120000,
+    retroThrust: 30000,
+    sideThrust:  8000,
+    maxTorque:   50,
+    description: 'Raw power, terrible handling. Commits to every maneuver three turns early.',
+  },
+};
 //
 //  Each track in the sequencer corresponds to one engine.
 //  lx / ly define the thrust direction in the ship's LOCAL space:
@@ -1755,8 +1819,9 @@ function drawShip() {
 
     const os = w2s(oppPos.x, oppPos.y);
 
-    // Opponent collision bubble — solid
-    const oppBubbleR = CONFIG.SHIP_RADIUS * UI.scale;
+    // Opponent collision bubble — sized to their hull class
+    const oppClass   = SHIP_CLASSES[Pilot.oppClass] || SHIP_CLASSES.frigate;
+    const oppBubbleR = oppClass.radius * UI.scale;
     mctx.beginPath(); mctx.arc(os.x, os.y, oppBubbleR, 0, Math.PI*2);
     mctx.strokeStyle = Pilot.oppColour + '55'; mctx.lineWidth = 1.5;
     mctx.stroke();
@@ -2258,11 +2323,17 @@ function resolveTurn(myCommands, oppCommands, logEntry) {
   const myResult  = simulate(State.ship.pos, State.ship.vel, State.ship.angle,
                               State.ship.angVel, myCommands, State.nextCheckIdx, State.rocks);
 
-  // Simulate opponent from their current position (multiplayer only)
-  const oppResult = (State.opponent && oppCommands)
-    ? simulate(State.opponent.pos, State.opponent.vel, State.opponent.angle,
-                State.opponent.angVel, oppCommands, State.nextCheckIdx, State.rocks)
-    : null;
+  // Simulate opponent from their current position using their ship class
+  let oppResult = null;
+  if (State.opponent && oppCommands) {
+    // Temporarily apply opponent's class to CONFIG for their simulation
+    const myClass = Pilot.shipClass;
+    applyShipClass(Pilot.oppClass || 'frigate');
+    oppResult = simulate(State.opponent.pos, State.opponent.vel, State.opponent.angle,
+                State.opponent.angVel, oppCommands, State.nextCheckIdx, State.rocks);
+    // Restore player's class
+    applyShipClass(myClass);
+  }
 
   // Store both trails in the log entry so replay can show both ships
   logEntry.trail       = myResult.trail;
@@ -2533,6 +2604,10 @@ function launchGame(overrideConfig) {
     randomOrder: document.getElementById('btn-order-rnd').classList.contains('active'),
   };
 
+  // Apply the player's chosen ship class — sets SHIP_MASS, SHIP_MOI, SHIP_RADIUS
+  // and updates slider caps before anything else runs
+  applyShipClass(Pilot.shipClass);
+
   // Generate beacons, checkpoint order, and start positions from courseConfig
   generateCourse(State.courseConfig);
 
@@ -2718,9 +2793,30 @@ document.getElementById('modal').addEventListener('keydown',e=>{
 const Pilot = {
   name:      'PILOT',
   colour:    '#00ff88',
+  shipClass: 'frigate',   // default class
   oppName:   'OPPONENT',
   oppColour: '#00aaff',
+  oppClass:  'frigate',
 };
+
+// Apply a ship class to CONFIG so all physics and UI systems pick it up.
+function applyShipClass(classId) {
+  const cls = SHIP_CLASSES[classId] || SHIP_CLASSES.frigate;
+  CONFIG.SHIP_MASS   = cls.mass;
+  CONFIG.SHIP_MOI    = cls.moi;
+  CONFIG.SHIP_RADIUS = cls.radius;
+
+  // Update sequencer mag-slider and modal to reflect class thrust limits
+  // Main engine sets the overall cap — other tracks are limited per-track at command creation
+  const magSlider = document.getElementById('mag-slider');
+  const mMag      = document.getElementById('m-mag');
+  const degInput  = document.getElementById('deg-input');
+  const mDeg      = document.getElementById('m-deg');
+  if (magSlider) { magSlider.max = cls.mainThrust; }
+  if (mMag)      { mMag.max      = cls.mainThrust; }
+  if (degInput)  { degInput.min  = -cls.maxTorque; degInput.max = cls.maxTorque; }
+  if (mDeg)      { mDeg.max      = cls.maxTorque; }
+}
 
 // Enforce uppercase on name input
 document.getElementById('pilot-name').addEventListener('input', function() {
@@ -2728,10 +2824,20 @@ document.getElementById('pilot-name').addEventListener('input', function() {
   Pilot.name = this.value || 'PILOT';
 });
 
+// Class button selection
+document.querySelectorAll('.class-btn').forEach(el => {
+  el.addEventListener('click', () => {
+    document.querySelectorAll('.class-btn').forEach(b => b.classList.remove('active'));
+    el.classList.add('active');
+    Pilot.shipClass = el.dataset.class;
+    document.getElementById('class-desc').textContent =
+      SHIP_CLASSES[Pilot.shipClass]?.description || '';
+  });
+});
+
 // Colour swatch selection
 document.querySelectorAll('.colour-swatch').forEach(el => {
   el.addEventListener('click', () => {
-    document.querySelectorAll('.colour-swatch').forEach(s => s.classList.remove('active'));
     el.classList.add('active');
     Pilot.colour = el.dataset.colour;
   });
@@ -2816,7 +2922,7 @@ document.getElementById('btn-create-room').addEventListener('click', async () =>
 
   // Write initial room state to Firebase
   await set(Lobby.roomRef, {
-    players: { alpha: { uid, name: Pilot.name||'PILOT', colour: Pilot.colour } },
+    players: { alpha: { uid, name: Pilot.name||'PILOT', colour: Pilot.colour, shipClass: Pilot.shipClass } },
     phase: 'lobby',
   });
 
@@ -2878,7 +2984,7 @@ document.getElementById('btn-join-room').addEventListener('click', async () => {
   }
 
   await update(ref(db, `games/${code}/players`), {
-    beta: { uid, name: myName, colour: myColour }
+    beta: { uid, name: myName, colour: myColour, shipClass: Pilot.shipClass }
   });
 
   showRoomDisplay(code);
@@ -2933,8 +3039,9 @@ function watchRoom() {
     // Store opponent pilot data locally
     const oppSlotData = Lobby.mySlot === 'alpha' ? beta : alpha;
     if (oppSlotData) {
-      Pilot.oppName   = oppSlotData.name   || 'OPPONENT';
-      Pilot.oppColour = oppSlotData.colour || '#00aaff';
+      Pilot.oppName   = oppSlotData.name      || 'OPPONENT';
+      Pilot.oppColour = oppSlotData.colour    || '#00aaff';
+      Pilot.oppClass  = oppSlotData.shipClass || 'frigate';
     }
 
     // Both players present — unlock proceed
