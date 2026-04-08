@@ -455,7 +455,25 @@ const FIREBASE_CONFIG = {
       Every run is data. Every collision is a lesson. Configure your proving ground.
     </div>
     <div id="menu-settings">
-      <div class="m-section-title">COURSE GENERATION</div>
+      <div class="m-section-title">COURSE LAYOUT</div>
+      <div class="menu-row">
+        <label>WAYPOINTS</label>
+        <input type="range" id="mn-waypoints" min="3" max="6" step="1" value="3">
+        <span class="menu-val" id="mv-waypoints">3</span>
+      </div>
+      <div class="menu-row">
+        <label>CHECKPOINT ORDER</label>
+        <div style="display:flex;gap:8px;">
+          <button class="lobby-mode-btn active" id="btn-order-seq" style="flex:1;font-size:10px;padding:4px;">⇒ SEQUENTIAL</button>
+          <button class="lobby-mode-btn"        id="btn-order-rnd" style="flex:1;font-size:10px;padding:4px;">⇄ RANDOM</button>
+        </div>
+      </div>
+      <div class="menu-row">
+        <label>COURSE RADIUS (km)</label>
+        <input type="range" id="mn-radius" min="50" max="200" step="10" value="80">
+        <span class="menu-val" id="mv-radius">80 km</span>
+      </div>
+      <div class="m-section-title" style="margin-top:14px;">COURSE GENERATION</div>
       <div class="seed-row">
         <label>COURSE SEED</label>
         <input type="number" id="mn-seed" value="42" min="1" max="999999">
@@ -463,18 +481,18 @@ const FIREBASE_CONFIG = {
       </div>
       <div class="menu-row">
         <label>ROCK COUNT</label>
-        <input type="range" id="mn-count" min="10" max="150" value="80">
+        <input type="range" id="mn-count" min="20" max="300" value="80">
         <span class="menu-val" id="mv-count">80</span>
       </div>
       <div class="m-section-title" style="margin-top:14px;">ROCK PROPERTIES</div>
       <div class="menu-row">
         <label>MIN ROCK SIZE (km)</label>
-        <input type="range" id="mn-minr" min="0.5" max="4" step="0.5" value="1.5">
+        <input type="range" id="mn-minr" min="1" max="5" step="0.5" value="1.5">
         <span class="menu-val" id="mv-minr">1.5 km</span>
       </div>
       <div class="menu-row">
         <label>MAX ROCK SIZE (km)</label>
-        <input type="range" id="mn-maxr" min="3" max="15" step="0.5" value="7">
+        <input type="range" id="mn-maxr" min="3" max="10" step="0.5" value="7">
         <span class="menu-val" id="mv-maxr">7.0 km</span>
       </div>
       <div class="menu-row">
@@ -482,16 +500,16 @@ const FIREBASE_CONFIG = {
         <input type="range" id="mn-gap" min="0.2" max="5" step="0.1" value="1">
         <span class="menu-val" id="mv-gap">1.0 km</span>
       </div>
-      <div class="m-section-title" style="margin-top:14px;">SAFETY ZONES</div>
+      <div class="m-section-title" style="margin-top:14px;">BEACON ZONES</div>
       <div class="menu-row">
-        <label>BEACON CLEARANCE (km)</label>
-        <input type="range" id="mn-bclear" min="6" max="30" step="1" value="14">
+        <label>EXCLUSION ZONE (km)</label>
+        <input type="range" id="mn-bclear" min="6" max="40" step="1" value="14">
         <span class="menu-val" id="mv-bclear">14 km</span>
       </div>
       <div class="menu-row">
-        <label>START CLEARANCE (km)</label>
-        <input type="range" id="mn-sclear" min="4" max="20" step="1" value="10">
-        <span class="menu-val" id="mv-sclear">10 km</span>
+        <label>GATE RADIUS (km)</label>
+        <input type="range" id="mn-gate" min="5" max="25" step="1" value="13">
+        <span class="menu-val" id="mv-gate">13 km</span>
       </div>
     </div>
     <div id="menu-footer">
@@ -510,7 +528,7 @@ const FIREBASE_CONFIG = {
       <div id="overlay-toggle-header">DISPLAY <span id="ov-arrow">▼</span></div>
       <div id="overlay-items">
         <div class="ov-item" data-key="grid">    <span class="ov-check on">✓</span> GRID</div>
-        <div class="ov-item" data-key="rings">   <span class="ov-check on">✓</span> RANGE RINGS</div>
+        <div class="ov-item" data-key="rings">   <span class="ov-check">✓</span> RANGE RINGS</div>
         <div class="ov-item" data-key="beacons"> <span class="ov-check on">✓</span> BEACONS</div>
         <div class="ov-item" data-key="rocks">   <span class="ov-check on">✓</span> ROCKS</div>
         <div class="ov-item" data-key="bounds">  <span class="ov-check on">✓</span> ARENA BOUNDS</div>
@@ -535,7 +553,7 @@ const FIREBASE_CONFIG = {
   <span class="ns-sep">|</span>
   <span class="ns-item">ROT RATE <span id="r-av">—</span> °/s</span>
   <span class="ns-sep">|</span>
-  <span class="ns-item">NEAREST BEACON <span id="r-db">---</span> km</span>
+  <span class="ns-item">ACTIVE BEACON <span id="r-db">---</span> km</span>
 </div>
 
 <!-- ── COMMAND PANEL ─────────────────────────────────────── -->
@@ -707,10 +725,13 @@ const CONFIG = {
   BOUNDS:      500,
   WARN_ZONE:   450,
 
-  // How close (km) the ship must get to a beacon for it to register.
-  GATE_RADIUS: 13,
+  // Gate radius is now configured per-course via State.courseConfig.gateRadius
+  // Default 13km — set via the menu before launch
 
-  // Viewport zoom limits in pixels-per-km.
+  // Ship collision radius in km — the ship is treated as a circle of this
+  // radius for collision detection rather than a dimensionless point.
+  // Visible as a faint bubble around the ship sprite.
+  SHIP_RADIUS: 0.5,
   SCALE_MIN:   10,
   SCALE_MAX:   2000,
 
@@ -746,52 +767,96 @@ const SEQ_H = TRACKS.length * CONFIG.TRACK_H + CONFIG.RULER_H;
 //  The three circuit waypoints. Arranged as an equilateral-ish
 //  triangle with ALPHA at the top. The ship starts at ALPHA.
 //
-// ── START POSITIONS ──────────────────────────────────────────
+// ── BEACON & COURSE GENERATION ───────────────────────────────
 //
-//  Both ships start near ALPHA beacon (0, 80), offset perpendicular
-//  to the ALPHA→BETA heading so they're side by side at launch.
+//  Beacons are placed on an N-gon of radius R, starting at the top
+//  and going clockwise. The first beacon (index 0) is the start.
+//  Checkpoint order visits 1..N-1 then returns to 0 to complete the lap.
 //
-//  ALPHA→BETA vector: (70, -120)
-//  Facing angle: atan2(70, 120) ≈ 0.528 rad clockwise from north.
-//  Perpendicular (left/right of that heading) for side-by-side placement.
+//  Labels cycle through a fixed list. Colors cycle through a palette.
 //
-(function() {
-  const toBeta = { x: 70 - 0, y: -40 - 80 };              // vector ALPHA→BETA
+const BEACON_LABELS = ['ALPHA','BETA','GAMMA','DELTA','EPSILON','ZETA'];
+const BEACON_COLORS = [
+  { color:'#00ff88', dim:'#1a6a4a' },
+  { color:'#00aaff', dim:'#1a3a6a' },
+  { color:'#ffaa00', dim:'#6a4a1a' },
+  { color:'#ff4444', dim:'#6a1a1a' },
+  { color:'#cc44ff', dim:'#4a1a6a' },
+  { color:'#44ffcc', dim:'#1a6a5a' },
+];
+
+// Mutable — regenerated each launch
+let BEACONS          = [];
+let CHECKPOINT_ORDER = [];
+
+// Generate beacons and checkpoint order from courseConfig.
+// Also computes and stores start positions for both ships.
+function generateCourse(cfg) {
+  const N = cfg.waypoints || 3;
+  const R = cfg.radius    || 80;
+
+  // Place beacons evenly on a circle, first one at the top (north)
+  BEACONS = [];
+  for (let i = 0; i < N; i++) {
+    const angle = (2 * Math.PI * i / N) - Math.PI/2; // start at top, go CW
+    // Note: negate sin for x to go clockwise in our coordinate system
+    BEACONS.push({
+      x:     Math.cos(angle) * R,
+      y:     Math.sin(angle) * R,
+      label: BEACON_LABELS[i] || `WP${i+1}`,
+      color: BEACON_COLORS[i % BEACON_COLORS.length].color,
+      dim:   BEACON_COLORS[i % BEACON_COLORS.length].dim,
+    });
+  }
+
+  // Checkpoint order: visit 1, 2, ... N-1, then back to 0
+  // In random mode, shuffle the intermediate waypoints using the course seed
+  // so both clients in a multiplayer race get the identical order.
+  CHECKPOINT_ORDER = [];
+  const intermediates = [];
+  for (let i = 1; i < N; i++) intermediates.push(i);
+
+  if (cfg.randomOrder) {
+    // Seeded Fisher-Yates shuffle
+    const rng = makeRNG(cfg.seed + 9999); // offset so it differs from rock seed
+    for (let i = intermediates.length - 1; i > 0; i--) {
+      const j = Math.floor(rng() * (i + 1));
+      [intermediates[i], intermediates[j]] = [intermediates[j], intermediates[i]];
+    }
+  }
+
+  CHECKPOINT_ORDER = [...intermediates, 0];
+
+  // Compute start positions facing beacon[0] toward the first checkpoint
+  computeStartPositions(BEACONS[0], BEACONS[CHECKPOINT_ORDER[0]]);
+}
+
+// Compute side-by-side start positions near beacon 0, facing beacon 1.
+function computeStartPositions(start, firstTarget) {
+  const toBeta = { x: firstTarget.x - start.x, y: firstTarget.y - start.y };
   const dist   = Math.hypot(toBeta.x, toBeta.y);
-  const fwd    = { x: toBeta.x/dist, y: toBeta.y/dist };   // unit forward vector
-  const perp   = { x: -fwd.y, y: fwd.x };                  // perpendicular (left)
+  const fwd    = { x: toBeta.x/dist, y: toBeta.y/dist };
+  const perp   = { x: -fwd.y, y: fwd.x };
 
-  // Facing angle so BETA appears directly above the ship on screen.
-  // Derived from w2s: for a world point (dx,dy) to appear at screen-top,
-  // we need 70*sin(a) + 120*cos(a) = 0 → a = -atan2(-toBeta.y, toBeta.x)
+  // Facing angle so firstTarget appears directly above on screen
   const facingAngle = -Math.atan2(-toBeta.y, toBeta.x);
-
   const OFFSET = 8; // km between ships
 
   CONFIG.START_ALPHA = {
-    pos:    { x:  perp.x * OFFSET/2, y: 80 + perp.y * OFFSET/2 },
-    angle:  facingAngle,
+    pos:   { x: start.x + perp.x * OFFSET/2, y: start.y + perp.y * OFFSET/2 },
+    angle: facingAngle,
   };
   CONFIG.START_BETA = {
-    pos:    { x: -perp.x * OFFSET/2, y: 80 - perp.y * OFFSET/2 },
-    angle:  facingAngle,
+    pos:   { x: start.x - perp.x * OFFSET/2, y: start.y - perp.y * OFFSET/2 },
+    angle: facingAngle,
   };
-})();
+}
 
 // Helper — returns the correct start state for a given slot
 function startStateForSlot(slot) {
   const s = slot === 'beta' ? CONFIG.START_BETA : CONFIG.START_ALPHA;
   return { pos:{...s.pos}, vel:{x:0,y:0}, angle:s.angle, angVel:0 };
 }
-
-const BEACONS = [
-  { x:   0, y:  80, label:'ALPHA', color:'#00ff88', dim:'#1a6a4a' },
-  { x:  70, y: -40, label:'BETA',  color:'#00aaff', dim:'#1a3a6a' },
-  { x: -70, y: -40, label:'GAMMA', color:'#ffaa00', dim:'#6a4a1a' },
-];
-
-// Order checkpoints must be visited: BETA (1) → GAMMA (2) → ALPHA (0)
-const CHECKPOINT_ORDER = [1, 2, 0];
 
 
 // ── STATE ────────────────────────────────────────────────────
@@ -826,13 +891,16 @@ const State = {
 
   // Course generation parameters — overwritten from the menu before launch.
   courseConfig: {
-    seed:       42,
-    count:      80,
-    minR:       1.5,
-    maxR:       7,
-    beaconClear:14,
-    shipClear:  10,
-    gap:        1,
+    seed:        42,
+    count:       80,
+    minR:        1.5,
+    maxR:        7,
+    beaconClear: 14,
+    gateRadius:  13,
+    gap:         1,
+    waypoints:   3,
+    radius:      80,
+    randomOrder: false,
   },
 
   // Lap tracking
@@ -894,7 +962,7 @@ const UI = {
 
   // Which viewport overlays are currently visible.
   overlays: {
-    grid: true, rings: true, beacons: true, rocks: true,
+    grid: true, rings: false, beacons: true, rocks: true,
     bounds: true, predict: true, heading: true, velArrow: true, labels: true,
   },
 
@@ -1037,7 +1105,7 @@ function simulate(startPos, startVel, startAngle, startAngVel, cmds, startCheckI
     // On collision: reflect velocity off surface normal, reduce by 50%,
     // and set a flag to cancel remaining commands for this turn.
     for (const rock of rocks) {
-      // Broad phase
+      // Broad phase: closest point on segment to rock center within ship radius + rock radius
       const segDx = pos.x - prevX, segDy = pos.y - prevY;
       const segLen2 = segDx*segDx + segDy*segDy;
       const tClosest = segLen2 > 0
@@ -1045,14 +1113,13 @@ function simulate(startPos, startVel, startAngle, startAngVel, cmds, startCheckI
         : 0;
       const closestX = prevX + tClosest*segDx;
       const closestY = prevY + tClosest*segDy;
-      if (Math.hypot(closestX - rock.x, closestY - rock.y) > rock.r * 1.5) continue;
+      if (Math.hypot(closestX - rock.x, closestY - rock.y) > rock.r * 1.5 + CONFIG.SHIP_RADIUS) continue;
 
-      // Narrow phase A: already inside polygon — push out and bounce
+      // Narrow phase A: ship circle overlaps polygon — push out and bounce
       if (pointInPoly(pos.x, pos.y, rock.verts)) {
         const pushOut = findNearestEdgePushOut(pos.x, pos.y, rock.verts);
-        pos.x += pushOut.nx * (pushOut.dist + 0.15);
-        pos.y += pushOut.ny * (pushOut.dist + 0.15);
-        // Reflect velocity off surface normal and halve magnitude
+        pos.x += pushOut.nx * (pushOut.dist + CONFIG.SHIP_RADIUS + 0.15);
+        pos.y += pushOut.ny * (pushOut.dist + CONFIG.SHIP_RADIUS + 0.15);
         const dot = vel.x * pushOut.nx + vel.y * pushOut.ny;
         vel.x = (vel.x - 2 * dot * pushOut.nx) * 0.5;
         vel.y = (vel.y - 2 * dot * pushOut.ny) * 0.5;
@@ -1060,12 +1127,11 @@ function simulate(startPos, startVel, startAngle, startAngVel, cmds, startCheckI
         break;
       }
 
-      // Narrow phase B: sweep hit — place at contact point and bounce
-      const hit = sweepPointPoly(prevX, prevY, pos.x, pos.y, rock.verts);
+      // Narrow phase B: sweep circle against polygon
+      const hit = sweepCirclePoly(prevX, prevY, pos.x, pos.y, CONFIG.SHIP_RADIUS, rock.verts);
       if (hit) {
-        pos.x = prevX + hit.t * (pos.x - prevX) + hit.nx * 0.15;
-        pos.y = prevY + hit.t * (pos.y - prevY) + hit.ny * 0.15;
-        // Reflect velocity off surface normal and halve magnitude
+        pos.x = prevX + hit.t * (pos.x - prevX) + hit.nx * (CONFIG.SHIP_RADIUS + 0.15);
+        pos.y = prevY + hit.t * (pos.y - prevY) + hit.ny * (CONFIG.SHIP_RADIUS + 0.15);
         const dot = vel.x * hit.nx + vel.y * hit.ny;
         vel.x = (vel.x - 2 * dot * hit.nx) * 0.5;
         vel.y = (vel.y - 2 * dot * hit.ny) * 0.5;
@@ -1074,6 +1140,21 @@ function simulate(startPos, startVel, startAngle, startAngVel, cmds, startCheckI
       }
     }
     } // end substep loop
+
+    // ── Circular hard wall bounce ────────────────────────────
+    const hardR = (State.courseConfig.radius || 80) * 1.2;
+    const distC = Math.hypot(pos.x, pos.y);
+    if (distC > hardR) {
+      const nx = pos.x / distC, ny = pos.y / distC;
+      pos.x = nx * (hardR - 0.1);
+      pos.y = ny * (hardR - 0.1);
+      const dot = vel.x * nx + vel.y * ny;
+      if (dot > 0) {
+        vel.x = (vel.x - 2 * dot * nx) * 0.5;
+        vel.y = (vel.y - 2 * dot * ny) * 0.5;
+        collided = true;
+      }
+    }
 
     // Record trail entry
     trail.push({ x:pos.x, y:pos.y, angle, vx:vel.x, vy:vel.y, angVel });
@@ -1085,7 +1166,7 @@ function simulate(startPos, startVel, startAngle, startAngVel, cmds, startCheckI
     // Check if the ship entered the gate radius of the next checkpoint.
     if (checkIdx < CHECKPOINT_ORDER.length) {
       const b = BEACONS[CHECKPOINT_ORDER[checkIdx]];
-      if (Math.hypot(pos.x - b.x, pos.y - b.y) < CONFIG.GATE_RADIUS) {
+      if (Math.hypot(pos.x - b.x, pos.y - b.y) < State.courseConfig.gateRadius) {
         checkpointEvents.push({
           step: trail.length - 1,
           beaconIdx: CHECKPOINT_ORDER[checkIdx],
@@ -1185,7 +1266,8 @@ function findNearestEdgePushOut(px, py, verts) {
       const len = Math.hypot(abx, aby);
       let enx = -aby/len, eny = abx/len;
       // Ensure normal points outward (away from polygon center)
-      if (enx*(a.x+b.x)/2 - cx + eny*(a.y+b.y)/2 - cy < 0) { enx=-enx; eny=-eny; }
+      const midX2=(a.x+b.x)/2, midY2=(a.y+b.y)/2;
+      if ((enx*(midX2-cx) + eny*(midY2-cy)) < 0) { enx=-enx; eny=-eny; }
       bestNx = enx; bestNy = eny;
     }
   }
@@ -1205,7 +1287,8 @@ function sweepPointPoly(px, py, nx2, ny2, verts) {
     if (t !== null && (hit === null || t < hit.t)) {
       const ex = b.x-a.x, ey = b.y-a.y, len = Math.hypot(ex, ey);
       let enx = -ey/len, eny = ex/len;
-      if (enx*(a.x+b.x)/2 - cx + eny*(a.y+b.y)/2 - cy < 0) { enx=-enx; eny=-eny; }
+      const midX2=(a.x+b.x)/2, midY2=(a.y+b.y)/2;
+      if ((enx*(midX2-cx) + eny*(midY2-cy)) < 0) { enx=-enx; eny=-eny; }
       hit = { t, nx: enx, ny: eny };
     }
   }
@@ -1237,13 +1320,15 @@ function generateRocks(cfg) {
   const rng      = makeRNG(cfg.seed);
   const placed   = [];
   const maxTries = cfg.count * 30;
-
-  // Bounding box that loosely wraps the triangle formed by the three beacons
-  const xMin = -88, xMax = 88, yMin = -58, yMax = 88;
+  const R        = cfg.radius || 80;
+  const hardWall = R * 1.2;  // rocks stay inside the hard boundary
 
   for (let attempt = 0; attempt < maxTries && placed.length < cfg.count; attempt++) {
-    const x = xMin + rng() * (xMax - xMin);
-    const y = yMin + rng() * (yMax - yMin);
+    // Place rocks within the hard boundary circle using rejection sampling
+    const x = (rng() * 2 - 1) * hardWall;
+    const y = (rng() * 2 - 1) * hardWall;
+    if (Math.hypot(x, y) > hardWall) continue;  // outside circle — skip
+
     const r = cfg.minR + rng() * (cfg.maxR - cfg.minR);
     let valid = true;
 
@@ -1255,8 +1340,8 @@ function generateRocks(cfg) {
     // Reject if too close to either ship start position
     const startA = CONFIG.START_ALPHA?.pos || {x:0, y:80};
     const startB = CONFIG.START_BETA?.pos  || {x:0, y:80};
-    if (valid && Math.hypot(x - startA.x, y - startA.y) < cfg.shipClear + r) valid = false;
-    if (valid && Math.hypot(x - startB.x, y - startB.y) < cfg.shipClear + r) valid = false;
+    if (valid && Math.hypot(x - startA.x, y - startA.y) < cfg.beaconClear + r) valid = false;
+    if (valid && Math.hypot(x - startB.x, y - startB.y) < cfg.beaconClear + r) valid = false;
 
     // Reject if overlapping another rock (enforce minimum surface gap)
     if (valid) {
@@ -1333,27 +1418,99 @@ function drawGrid(W, H) {
   }
 }
 
-// Arena boundary — a dashed rectangle at ±500km in world space.
-// Turns red and flashes the screen when the ship gets close.
+// Arena boundary — two concentric circles based on course radius.
+// Soft warning zone at R*1.1, hard wall at R*1.2.
 function drawBounds() {
-  const corners = [[-CONFIG.BOUNDS,-CONFIG.BOUNDS],[CONFIG.BOUNDS,-CONFIG.BOUNDS],[CONFIG.BOUNDS,CONFIG.BOUNDS],[-CONFIG.BOUNDS,CONFIG.BOUNDS]];
-  const dp = currentDrawPos();
-  const nearEdge = Math.max(Math.abs(dp.x), Math.abs(dp.y)) > CONFIG.WARN_ZONE;
-  mctx.setLineDash([6,8]);
-  mctx.strokeStyle = nearEdge ? '#ff330055' : '#002a00';
+  const cfg      = State.courseConfig;
+  const R        = cfg.radius || 80;
+  const softR    = R * 1.1;
+  const hardR    = R * 1.2;
+  const dp       = currentDrawPos();
+  const distFromCenter = Math.hypot(dp.x, dp.y);
+  const nearEdge = distFromCenter > softR;
+  const center   = w2s(0, 0);
+
+  // Hard wall circle
+  mctx.setLineDash([6, 8]);
+  mctx.strokeStyle = nearEdge ? '#ff330088' : '#002a00';
   mctx.lineWidth   = nearEdge ? 1.5 : 1;
   mctx.beginPath();
-  corners.forEach(([wx,wy],i) => { const s=w2s(wx,wy); i===0?mctx.moveTo(s.x,s.y):mctx.lineTo(s.x,s.y); });
-  mctx.closePath(); mctx.stroke(); mctx.setLineDash([]);
-  mctx.fillStyle = nearEdge ? '#ff330044' : '#001e00';
+  mctx.arc(center.x, center.y, hardR * UI.scale, 0, Math.PI * 2);
+  mctx.stroke();
+
+  // Soft warning circle
+  mctx.strokeStyle = nearEdge ? '#ff330033' : '#001800';
+  mctx.lineWidth   = 1;
+  mctx.beginPath();
+  mctx.arc(center.x, center.y, softR * UI.scale, 0, Math.PI * 2);
+  mctx.stroke();
+  mctx.setLineDash([]);
+
+  // Label
+  mctx.fillStyle = nearEdge ? '#ff330088' : '#001e00';
   mctx.font = '8px Courier New';
-  const tl = w2s(-CONFIG.BOUNDS, CONFIG.BOUNDS);
-  mctx.fillText('±500km', tl.x+4, tl.y+12);
+  const labelS = w2s(0, -hardR);
+  mctx.fillText(`BOUNDARY ${hardR.toFixed(0)}km`, labelS.x - 30, labelS.y - 6);
+
+  // Screen tint when near edge
   if (nearEdge) { mctx.fillStyle='rgba(255,51,0,0.06)'; mctx.fillRect(0,0,mc.width,mc.height); }
 }
 
 // Rocks — draw each as its polygon vertices projected to screen space.
 // The visual shape IS the collision shape (same verts array).
+// Sweep a circle of radius R from (px,py) to (nx2,ny2) against a polygon.
+// Returns { t, nx, ny } for earliest hit or null.
+// Implementation: inflate each polygon edge outward by R, then run the
+// standard point sweep against the inflated edges. Also check the circle
+// against each polygon vertex (for convex corners).
+function sweepCirclePoly(px, py, nx2, ny2, r, verts) {
+  let hit = null;
+  const cx = verts.reduce((s,v) => s+v.x, 0) / verts.length;
+  const cy = verts.reduce((s,v) => s+v.y, 0) / verts.length;
+
+  for (let i = 0; i < verts.length; i++) {
+    const a = verts[i], b = verts[(i+1) % verts.length];
+
+    // Edge normal pointing outward from polygon center
+    const ex = b.x-a.x, ey = b.y-a.y, len = Math.hypot(ex, ey);
+    let enx = -ey/len, eny = ex/len;
+    // Dot product of normal against vector from center to edge midpoint
+    // If negative the normal points inward — flip it
+    const midX = (a.x+b.x)/2, midY = (a.y+b.y)/2;
+    if ((enx*(midX-cx) + eny*(midY-cy)) < 0) { enx=-enx; eny=-eny; }
+
+    // Inflate edge outward by r — move both endpoints along the normal
+    const a2x = a.x + enx*r, a2y = a.y + eny*r;
+    const b2x = b.x + enx*r, b2y = b.y + eny*r;
+
+    // Test movement segment against inflated edge
+    const t = segSegT(px, py, nx2, ny2, a2x, a2y, b2x, b2y);
+    if (t !== null && (hit === null || t < hit.t)) {
+      hit = { t, nx: enx, ny: eny };
+    }
+
+    // Also test against vertex circles (handles convex corners)
+    for (const v of [a, b]) {
+      const dvx = px - v.x, dvy = py - v.y;
+      const dmx = (nx2-px), dmy = (ny2-py);
+      const A = dmx*dmx + dmy*dmy;
+      if (A < 1e-12) continue;
+      const B = 2*(dvx*dmx + dvy*dmy);
+      const C = dvx*dvx + dvy*dvy - r*r;
+      const disc = B*B - 4*A*C;
+      if (disc < 0) continue;
+      const tv = (-B - Math.sqrt(disc)) / (2*A);
+      if (tv >= 0 && tv <= 1 && (hit === null || tv < hit.t)) {
+        // Normal points from vertex toward circle center at impact
+        const ix = px + tv*dmx - v.x, iy = py + tv*dmy - v.y;
+        const ilen = Math.hypot(ix, iy) || 1;
+        hit = { t: tv, nx: ix/ilen, ny: iy/ilen };
+      }
+    }
+  }
+  return hit;
+}
+
 function drawRocks() {
   State.rocks.forEach(rock => {
     const sverts = rock.verts.map(v => w2s(v.x, v.y));
@@ -1373,14 +1530,15 @@ function drawBeacons() {
   const t = Date.now() / 1000;
   const W = mc.width, H = mc.height;
   const MARGIN = 24;
+  const activeBeaconIdx = State.lapComplete ? -1 : CHECKPOINT_ORDER[State.nextCheckIdx];
 
-  BEACONS.forEach(b => {
+  BEACONS.forEach((b, bi) => {
     const s = w2s(b.x, b.y);
     const onScreen = s.x > -20 && s.x < W+20 && s.y > -20 && s.y < H+20;
+    const isNext = bi === activeBeaconIdx;
 
     if (onScreen) {
-      const pulse  = 0.5 + 0.5 * Math.sin(t * 1.8);
-      const isNext = !State.lapComplete && CHECKPOINT_ORDER[State.nextCheckIdx] === BEACONS.indexOf(b);
+      const pulse = 0.5 + 0.5 * Math.sin(t * 1.8);
 
       mctx.beginPath(); mctx.arc(s.x,s.y,10+pulse*7,0,Math.PI*2);
       mctx.strokeStyle=`${b.color}22`; mctx.lineWidth=1; mctx.stroke();
@@ -1389,8 +1547,7 @@ function drawBeacons() {
       mctx.beginPath(); mctx.arc(s.x,s.y,2.5,0,Math.PI*2); mctx.fillStyle=b.color; mctx.fill();
 
       if (isNext) {
-        // Dashed gate ring at GATE_RADIUS km
-        const gr = CONFIG.GATE_RADIUS * UI.scale;
+        const gr = State.courseConfig.gateRadius * UI.scale;
         mctx.beginPath(); mctx.arc(s.x,s.y,gr,0,Math.PI*2);
         mctx.strokeStyle=b.color+'55'; mctx.lineWidth=1.5;
         mctx.setLineDash([6,6]); mctx.stroke(); mctx.setLineDash([]);
@@ -1406,8 +1563,33 @@ function drawBeacons() {
       mctx.fillStyle=b.dim;
       mctx.fillText(`[${b.x.toFixed(0)}, ${b.y.toFixed(0)}]`, s.x+16, s.y+7);
 
-    } else {
-      // Off-screen: ray-cast from screen center to beacon, clamp to viewport edge
+      // Arrow pointing toward the next beacon in the checkpoint sequence
+      // Find which checkpoint position this beacon occupies, then look at the next
+      const cpPos = CHECKPOINT_ORDER.indexOf(bi);
+      const nextCpBeaconIdx = cpPos >= 0 && cpPos < CHECKPOINT_ORDER.length - 1
+        ? CHECKPOINT_ORDER[cpPos + 1]
+        : null;
+      if (nextCpBeaconIdx !== null) {
+        const nb  = BEACONS[nextCpBeaconIdx];
+        const ns  = w2s(nb.x, nb.y);
+        const adx = ns.x - s.x, ady = ns.y - s.y;
+        const alen = Math.hypot(adx, ady) || 1;
+        const anx = adx/alen, any = ady/alen;
+        const arrowStart = 18, arrowLen = 22, ah = 6;
+        const ax1 = s.x + anx*arrowStart,     ay1 = s.y + any*arrowStart;
+        const ax2 = s.x + anx*(arrowStart+arrowLen), ay2 = s.y + any*(arrowStart+arrowLen);
+        const aAngle = Math.atan2(ady, adx);
+        mctx.strokeStyle = b.color+'88'; mctx.lineWidth = 1.5;
+        mctx.beginPath(); mctx.moveTo(ax1, ay1); mctx.lineTo(ax2, ay2); mctx.stroke();
+        mctx.fillStyle = b.color+'88';
+        mctx.beginPath(); mctx.moveTo(ax2, ay2);
+        mctx.lineTo(ax2 - ah*Math.cos(aAngle-0.45), ay2 - ah*Math.sin(aAngle-0.45));
+        mctx.lineTo(ax2 - ah*Math.cos(aAngle+0.45), ay2 - ah*Math.sin(aAngle+0.45));
+        mctx.closePath(); mctx.fill();
+      }
+
+    } else if (isNext) {
+      // Off-screen dorito — only drawn for the active beacon
       const ocx=W/2, ocy=H/2;
       const rdx=s.x-ocx, rdy=s.y-ocy;
       const angle=Math.atan2(rdy,rdx);
@@ -1512,12 +1694,25 @@ function drawShip() {
   const sx = mc.width/2  + UI.panOffset.x;
   const sy = mc.height/2 + UI.panOffset.y;
 
-  // Triangle pointing up — ship facing is always "up"
+  // Collision bubble — solid circle showing the ship's physical extent
+  const bubbleR = CONFIG.SHIP_RADIUS * UI.scale;
+  mctx.beginPath(); mctx.arc(sx, sy, bubbleR, 0, Math.PI*2);
+  mctx.strokeStyle = Pilot.colour + '55'; mctx.lineWidth = 1.5;
+  mctx.stroke();
+
+  // Triangle with vertices touching the collision circle
+  // Equilateral triangle inscribed in circle of radius bubbleR:
+  //   tip:   (0, -R)
+  //   left:  (-R*sin60, R*cos60) = (-0.866R,  0.5R)
+  //   right: ( R*sin60, R*cos60) = ( 0.866R,  0.5R)
   mctx.beginPath();
-  mctx.moveTo(sx,sy-10); mctx.lineTo(sx-7,sy+7*0.8); mctx.lineTo(sx+7,sy+7*0.8);
-  mctx.closePath(); mctx.fillStyle='#001a00'; mctx.fill();
+  mctx.moveTo(sx,                    sy - bubbleR);
+  mctx.lineTo(sx - bubbleR * 0.866,  sy + bubbleR * 0.5);
+  mctx.lineTo(sx + bubbleR * 0.866,  sy + bubbleR * 0.5);
+  mctx.closePath();
+  mctx.fillStyle='#001a00'; mctx.fill();
   mctx.strokeStyle=Pilot.colour; mctx.lineWidth=1.5; mctx.stroke();
-  mctx.beginPath(); mctx.arc(sx,sy-10,2,0,Math.PI*2);
+  mctx.beginPath(); mctx.arc(sx, sy - bubbleR, 2, 0, Math.PI*2);
   mctx.fillStyle=Pilot.colour; mctx.fill();
 
   // Velocity arrow in player colour
@@ -1559,16 +1754,25 @@ function drawShip() {
           angle: State.opponent.angle };
 
     const os = w2s(oppPos.x, oppPos.y);
+
+    // Opponent collision bubble — solid
+    const oppBubbleR = CONFIG.SHIP_RADIUS * UI.scale;
+    mctx.beginPath(); mctx.arc(os.x, os.y, oppBubbleR, 0, Math.PI*2);
+    mctx.strokeStyle = Pilot.oppColour + '55'; mctx.lineWidth = 1.5;
+    mctx.stroke();
+
     const relAngle = (oppPos.angle || 0) - (currentDrawPos().angle || 0);
     mctx.save();
     mctx.translate(os.x, os.y);
     mctx.rotate(-relAngle);
     mctx.beginPath();
-    mctx.moveTo(0,-10); mctx.lineTo(-7,7*0.8); mctx.lineTo(7,7*0.8);
+    mctx.moveTo(0,               -oppBubbleR);
+    mctx.lineTo(-oppBubbleR * 0.866,  oppBubbleR * 0.5);
+    mctx.lineTo( oppBubbleR * 0.866,  oppBubbleR * 0.5);
     mctx.closePath();
     mctx.fillStyle='#001a00'; mctx.fill();
     mctx.strokeStyle=Pilot.oppColour; mctx.lineWidth=1.5; mctx.stroke();
-    mctx.beginPath(); mctx.arc(0,-10,2,0,Math.PI*2);
+    mctx.beginPath(); mctx.arc(0, -oppBubbleR, 2, 0, Math.PI*2);
     mctx.fillStyle=Pilot.oppColour; mctx.fill();
     mctx.restore();
 
@@ -1647,16 +1851,22 @@ function updateReadouts() {
     (lavDeg < 0 ? '↻ ' : '↺ ') + Math.abs(lavDeg).toFixed(3);
 
   // Nearest beacon distance
-  let nearestDist=Infinity, nearestLabel='---';
-  BEACONS.forEach(b => {
-    const d=Math.hypot(dp.x-b.x,dp.y-b.y);
-    if (d<nearestDist) { nearestDist=d; nearestLabel=b.label; }
-  });
-  document.getElementById('r-db').textContent = `${nearestDist.toFixed(2)} (${nearestLabel})`;
+  // Active beacon distance
+  const activeIdx = State.lapComplete ? -1 : CHECKPOINT_ORDER[State.nextCheckIdx];
+  const activeB   = BEACONS[activeIdx];
+  if (activeB) {
+    const activeDist = Math.hypot(dp.x - activeB.x, dp.y - activeB.y);
+    document.getElementById('r-db').textContent = `${activeDist.toFixed(2)} (${activeB.label})`;
+  } else {
+    document.getElementById('r-db').textContent = '--- (NONE)';
+  }
 
   // Boundary warning
-  if (Math.max(Math.abs(dp.x),Math.abs(dp.y)) > CONFIG.WARN_ZONE && !UI.playing) {
-    setStatus(`WARNING — APPROACHING ARENA BOUNDARY (${Math.max(Math.abs(dp.x),Math.abs(dp.y)).toFixed(0)} km / ${CONFIG.BOUNDS} km)`);
+  const distFromCenter = Math.hypot(dp.x, dp.y);
+  const softR = (State.courseConfig.radius || 80) * 1.1;
+  const hardR = (State.courseConfig.radius || 80) * 1.2;
+  if (distFromCenter > softR && !UI.playing) {
+    setStatus(`WARNING — APPROACHING BOUNDARY (${distFromCenter.toFixed(0)} km / ${hardR.toFixed(0)} km)`);
   }
 }
 
@@ -2285,12 +2495,24 @@ function menuSlider(id,valId,suffix,decimals) {
   vl.textContent=parseFloat(el.value).toFixed(decimals)+suffix;
   el.addEventListener('input',()=>{ vl.textContent=parseFloat(el.value).toFixed(decimals)+suffix; });
 }
+menuSlider('mn-waypoints','mv-waypoints','',0);
+menuSlider('mn-radius',  'mv-radius',  ' km',0);
+
+// Checkpoint order toggle
+document.getElementById('btn-order-seq').addEventListener('click', () => {
+  document.getElementById('btn-order-seq').classList.add('active');
+  document.getElementById('btn-order-rnd').classList.remove('active');
+});
+document.getElementById('btn-order-rnd').addEventListener('click', () => {
+  document.getElementById('btn-order-rnd').classList.add('active');
+  document.getElementById('btn-order-seq').classList.remove('active');
+});
 menuSlider('mn-count','mv-count','',0);
 menuSlider('mn-minr', 'mv-minr',' km',1);
 menuSlider('mn-maxr', 'mv-maxr',' km',1);
 menuSlider('mn-gap',  'mv-gap', ' km',1);
 menuSlider('mn-bclear','mv-bclear',' km',0);
-menuSlider('mn-sclear','mv-sclear',' km',0);
+menuSlider('mn-gate',  'mv-gate',  ' km',0);
 
 document.getElementById('btn-rand-seed').addEventListener('click',()=>{
   document.getElementById('mn-seed').value=Math.floor(Math.random()*999999)+1;
@@ -2305,11 +2527,17 @@ function launchGame(overrideConfig) {
     maxR:       parseFloat(document.getElementById('mn-maxr').value)  || 7,
     gap:        parseFloat(document.getElementById('mn-gap').value)   || 1,
     beaconClear: parseInt(document.getElementById('mn-bclear').value) || 14,
-    shipClear:   parseInt(document.getElementById('mn-sclear').value) || 10,
+    gateRadius:  parseInt(document.getElementById('mn-gate').value)   || 13,
+    waypoints:   parseInt(document.getElementById('mn-waypoints').value) || 3,
+    radius:      parseInt(document.getElementById('mn-radius').value)    || 80,
+    randomOrder: document.getElementById('btn-order-rnd').classList.contains('active'),
   };
 
-  // Generate new course
-  State.rocks=generateRocks(State.courseConfig);
+  // Generate beacons, checkpoint order, and start positions from courseConfig
+  generateCourse(State.courseConfig);
+
+  // Generate rocks — must happen after generateCourse so BEACONS are set
+  State.rocks = generateRocks(State.courseConfig);
 
   // In multiplayer, initialise opponent at the other slot's start position
   if (Lobby.mode === 'multi') {
@@ -2334,7 +2562,8 @@ function launchGame(overrideConfig) {
   markPredictionDirty();
   updateSelPanel(); renderSeq();
   document.getElementById('menu-overlay').classList.add('hidden');
-  setStatus(`MISSION LAUNCHED — SEED: ${State.courseConfig.seed} · ${State.rocks.length} ROCKS · NEXT: BETA`);
+  const firstCheck = BEACONS[CHECKPOINT_ORDER[0]]?.label || '?';
+  setStatus(`MISSION LAUNCHED — SEED: ${State.courseConfig.seed} · ${State.rocks.length} ROCKS · NEXT: ${firstCheck}`);
 }
 
 function exitToMenu() {
@@ -2777,10 +3006,11 @@ async function multiLaunch() {
     maxR:       parseFloat(document.getElementById('mn-maxr').value)  || 7,
     gap:        parseFloat(document.getElementById('mn-gap').value)   || 1,
     beaconClear: parseInt(document.getElementById('mn-bclear').value) || 14,
-    shipClear:   parseInt(document.getElementById('mn-sclear').value) || 10,
+    gateRadius:  parseInt(document.getElementById('mn-gate').value)   || 13,
+    waypoints:   parseInt(document.getElementById('mn-waypoints').value) || 3,
+    radius:      parseInt(document.getElementById('mn-radius').value)    || 80,
+    randomOrder: document.getElementById('btn-order-rnd').classList.contains('active'),
   };
-
-  // Push config and signal non-host to launch
   await update(ref(window.FB.db, `games/${Lobby.roomId}`), {
     courseConfig,
     phase: 'playing',
