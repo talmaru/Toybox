@@ -3222,7 +3222,7 @@ function startGameplay(courseConfig) {
 // ── Host pushes course config and launches ───────────────────
 async function multiLaunch() {
   if (!Lobby.isHost || Lobby.mode !== 'multi') { startGameplay(); return; }
-  const { db, ref, update } = window.FB;
+  const { db, ref, update, get } = window.FB;
 
   const courseConfig = {
     seed:        parseInt(document.getElementById('mn-seed').value)   || 42,
@@ -3236,7 +3236,19 @@ async function multiLaunch() {
     radius:      parseInt(document.getElementById('mn-radius').value)    || 80,
     randomOrder: document.getElementById('btn-order-rnd').classList.contains('active'),
   };
-  await update(ref(window.FB.db, `games/${Lobby.roomId}`), {
+
+  // Read opponent data directly from Firebase before launching.
+  // Don't rely on watchRoom's onValue having fired — it's async and
+  // may not have updated Pilot.oppColour yet when we call startGameplay.
+  const snapshot = await get(ref(db, `games/${Lobby.roomId}/players/beta`));
+  if (snapshot.exists()) {
+    const beta = snapshot.val();
+    Pilot.oppName   = beta.name      || 'OPPONENT';
+    Pilot.oppColour = beta.colour    || '#00aaff';
+    Pilot.oppClass  = beta.shipClass || 'frigate';
+  }
+
+  await update(ref(db, `games/${Lobby.roomId}`), {
     courseConfig,
     phase: 'playing',
   });
