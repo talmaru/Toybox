@@ -587,6 +587,12 @@ const FIREBASE_CONFIG = {
   <span class="ns-item">ROT RATE <span id="r-av">—</span> °/s</span>
   <span class="ns-sep">|</span>
   <span class="ns-item">ACTIVE BEACON <span id="r-db">---</span> km</span>
+  <span class="ns-sep">|</span>
+  <span class="ns-item">ENERGY <span id="r-energy" style="color:var(--accent)">—</span></span>
+  <span class="ns-sep">|</span>
+  <span class="ns-item">PLAN COST <span id="r-energy-cost" style="color:var(--text-dim)">—</span></span>
+  <span class="ns-sep">|</span>
+  <span class="ns-item">PROJECTED <span id="r-energy-proj" style="color:var(--accent)">—</span></span>
 </div>
 
 <!-- ── COMMAND PANEL ─────────────────────────────────────── -->
@@ -614,8 +620,8 @@ const FIREBASE_CONFIG = {
 
     <!-- Thrust derived readouts: impulse and delta-v -->
     <div id="derived-readouts" style="display:none; font-size:11px; color:var(--text-dim); line-height:1.8; border-left:1px solid var(--grid); padding-left:12px; white-space:nowrap;">
-      IMPULSE: <span id="si-impulse" style="color:var(--bright)">—</span> kN·s<br>
-      Δv: <span id="si-dv" style="color:var(--bright)">—</span> km/s
+      IMPULSE: <span id="si-impulse" style="color:var(--bright)">—</span> kN·s &nbsp; Δv: <span id="si-dv" style="color:var(--bright)">—</span> km/s<br>
+      DRAW: <span id="si-draw" style="color:var(--bright)">—</span>/s &nbsp; REGEN: <span id="si-regen" style="color:var(--bright)">—</span>/s &nbsp; NET: <span id="si-net">—</span>/s &nbsp; COST: <span id="si-energy-cost" style="color:var(--accent)">—</span>
     </div>
 
     <!-- Rotate controls (hidden for thrust commands) -->
@@ -628,8 +634,8 @@ const FIREBASE_CONFIG = {
 
       <!-- Rotate derived readouts: angular impulse and delta-omega -->
       <div id="derived-rot" style="display:none; font-size:11px; color:var(--text-dim); line-height:1.8; border-left:1px solid var(--grid); padding-left:12px; white-space:nowrap;">
-        ANG IMPULSE: <span id="si-ang-impulse" style="color:var(--bright)">—</span> kN·m·s<br>
-        Δω: <span id="si-dav" style="color:var(--bright)">—</span> °/s
+        ANG IMPULSE: <span id="si-ang-impulse" style="color:var(--bright)">—</span> kN·m·s &nbsp; Δω: <span id="si-dav" style="color:var(--bright)">—</span> °/s<br>
+        DRAW: <span id="si-rot-draw" style="color:var(--bright)">—</span>/s &nbsp; REGEN: <span id="si-rot-regen" style="color:var(--bright)">—</span>/s &nbsp; NET: <span id="si-rot-net">—</span>/s &nbsp; COST: <span id="si-rot-energy-cost" style="color:var(--accent)">—</span>
       </div>
 
       <!-- Hidden buttons kept in DOM for modal compatibility -->
@@ -851,6 +857,17 @@ const CONFIG = {
   ROCK_PLACEMENT_TRIES:   30,
   CHECKPOINT_SEED_OFFSET: 9999,
   BEACON_PULSE_SPEED:     1.8,
+
+  // ── Energy ─────────────────────────────────────────────────
+  //
+  //  ENERGY_COST_FACTOR: energy consumed per Newton (or Newton-metre
+  //  for torque) per timestep. At 0.01 this equals DT, so the
+  //  energy cost of a burn is numerically equal to the impulse
+  //  delivered — a nice physical correspondence.
+  //
+  //  Example: 50,000 N for 100 steps costs 50,000 × 0.01 × 100 = 50,000 energy.
+  //
+  ENERGY_COST_FACTOR: 0.01,
 };
 
 // ── SHIP CLASSES ─────────────────────────────────────────────
@@ -872,7 +889,11 @@ const SHIP_CLASSES = {
     mainThrust:  80000,
     retroThrust: 40000,
     sideThrust:  20000,
-    maxTorque:   39,   // (π/2 * 25000) / 1000 → ~90° max rotation per turn
+    maxTorque:   39,
+    // Energy: small battery, fast recharge. Favors sustained single-engine
+    // burns. Multi-engine maneuvers drain fast but recover quickly.
+    energyCapacity: 35000,
+    energyRecharge: 600,     // per timestep — 60,000/turn
     description: 'Fast and nimble. Low mass makes it extremely responsive but hard to stop.',
   },
   frigate: {
@@ -884,7 +905,11 @@ const SHIP_CLASSES = {
     mainThrust:  50000,
     retroThrust: 25000,
     sideThrust:  12500,
-    maxTorque:   39,   // (π/4 * 50000) / 1000 → ~45° max rotation per turn
+    maxTorque:   39,
+    // Energy: balanced battery and recharge. Can sustain two systems
+    // at full power. Three systems causes throttling in the last quarter.
+    energyCapacity: 50000,
+    energyRecharge: 350,     // per timestep — 35,000/turn
     description: 'Balanced all-rounder. The default hull.',
   },
   hauler: {
@@ -896,7 +921,12 @@ const SHIP_CLASSES = {
     mainThrust:  120000,
     retroThrust: 30000,
     sideThrust:  8000,
-    maxTorque:   58,   // (0.384 * 150000) / 1000 → ~22° max rotation per turn
+    maxTorque:   58,
+    // Energy: deep battery, slow recharge. Can dump massive power in
+    // short bursts. Complex maneuvers drain the reserves but the deep
+    // battery buys more full-power steps than any other hull.
+    energyCapacity: 100000,
+    energyRecharge: 500,     // per timestep — 50,000/turn
     description: 'Raw power, terrible handling. Commits to every maneuver three turns early.',
   },
 };
@@ -1064,7 +1094,8 @@ function startStateForSlot(slot) {
   const idx = SLOTS.indexOf(slot);
   const positions = CONFIG.START_POSITIONS || [CONFIG.START_ALPHA];
   const s = positions[Math.max(0, idx)] || positions[0];
-  return { pos:{...s.pos}, vel:{x:0,y:0}, angle:s.angle, angVel:0 };
+  const cls = SHIP_CLASSES[Pilot.shipClass] || SHIP_CLASSES.frigate;
+  return { pos:{...s.pos}, vel:{x:0,y:0}, angle:s.angle, angVel:0, energy:cls.energyCapacity };
 }
 
 
@@ -1085,7 +1116,7 @@ const State = {
   //   angVel: radians/second (positive = CCW, negative = CW)
   // Ship starts at the position for this player's slot (alpha/beta).
   // Slot is determined after lobby — default to alpha for solo mode.
-  ship: { pos:{x:0,y:80}, vel:{x:0,y:0}, angle:0, angVel:0 },
+  ship: { pos:{x:0,y:80}, vel:{x:0,y:0}, angle:0, angVel:0, energy:50000 },
 
   // Opponent ships — only populated in multiplayer.
   // One entry per opponent: { pos, vel, angle, angVel }
@@ -1301,19 +1332,38 @@ function resolveShipCollision(s1, s2) {
   return true;
 }
 
+// ── Compute energy demand for one timestep ───────────────────
+//
+//  Sums the energy draw of all commands active at the given step.
+//  Thrust costs newtons × costFactor per step.
+//  Rotation costs torque_Nm × costFactor per step.
+//  Returns total energy demanded this step (before throttling).
+//
+function computeStepDemand(cmds, step, costFactor) {
+  let demand = 0;
+  for (const c of cmds) {
+    if (step < c.startStep || step >= c.stopStep) continue;
+    if (c.type === 'rotate') {
+      demand += c.torque * 1000 * costFactor;   // kN·m → N·m, then × factor
+    } else {
+      demand += c.newtons * costFactor;
+    }
+  }
+  return demand;
+}
+
 // ── Apply commands to a ship for one timestep ────────────────
 //
-//  This is the shared integration helper that eliminates the
-//  duplicated thrust/rotation code. Both the primary ship and
-//  all opponent ships call this same function.
+//  Shared integration helper for thrust and rotation. Both the
+//  primary ship and all opponent ships call this same function.
 //
-//  Arguments:
-//    ship  — mutable { pos, vel, angle, angVel, mass, moi }
-//    cmds  — array of command objects for this ship
-//    step  — current timestep index (0–99)
-//    dt    — timestep duration in seconds
+//  The throttle parameter (0–1) scales all forces equally.
+//  At 1.0, commands apply at full power. Below 1.0, all forces
+//  are reduced proportionally — the ship gets the same fraction
+//  of acceleration from every active system. This implements the
+//  "split available power equally among loads" energy model.
 //
-function applyCommands(ship, cmds, step, dt) {
+function applyCommands(ship, cmds, step, dt, throttle = 1.0) {
   for (const c of cmds) {
     if (step < c.startStep || step >= c.stopStep) continue;
 
@@ -1321,7 +1371,7 @@ function applyCommands(ship, cmds, step, dt) {
       // Torque is stored in kN·m, convert to N·m for physics.
       // angular acceleration = torque / moment of inertia.
       // CW rotation is negative in our coordinate system.
-      const alpha = ((c.torque * 1000) / ship.moi) * (c.cw ? -1 : 1);
+      const alpha = ((c.torque * 1000 * throttle) / ship.moi) * (c.cw ? -1 : 1);
       ship.angVel += alpha * dt;
     } else {
       // Thrust — resolve the local-space direction into world-space
@@ -1330,8 +1380,8 @@ function applyCommands(ship, cmds, step, dt) {
       if (!tr) continue;
       const wx = tr.lx * Math.cos(ship.angle) - tr.ly * Math.sin(ship.angle);
       const wy = tr.lx * Math.sin(ship.angle) + tr.ly * Math.cos(ship.angle);
-      ship.vel.x += (wx * c.newtons / ship.mass) * dt;
-      ship.vel.y += (wy * c.newtons / ship.mass) * dt;
+      ship.vel.x += (wx * c.newtons * throttle / ship.mass) * dt;
+      ship.vel.y += (wy * c.newtons * throttle / ship.mass) * dt;
     }
   }
 }
@@ -1429,8 +1479,16 @@ function simulate(startPos, startVel, startAngle, startAngVel, cmds, startCheckI
   const beacons       = params.beacons           || BEACONS;
   const checkOrder    = params.checkpointOrder   || CHECKPOINT_ORDER;
 
+  // Energy parameters. If energyCapacity is 0 or undefined, energy
+  // is unlimited (no throttling) — this lets opponent ships simulate
+  // without energy constraints until per-player energy sync is added.
+  const energyCapacity  = params.energyCapacity  || 0;
+  const energyRecharge  = params.energyRecharge  || 0;
+  const energyCostFactor= params.energyCostFactor ?? CONFIG.ENERGY_COST_FACTOR;
+
   // Build a mutable ship object for the primary ship.
   // This is what applyCommands() and the collision helpers operate on.
+  const startEnergy = params.startEnergy ?? energyCapacity;
   const primary = {
     pos:    { ...startPos },
     vel:    { ...startVel },
@@ -1440,6 +1498,10 @@ function simulate(startPos, startVel, startAngle, startAngVel, cmds, startCheckI
     moi,
     radius,
   };
+
+  // Energy state — tracked separately since it's not part of the ship physics object.
+  // This keeps the ship object compatible with collision helpers that don't care about energy.
+  let energy = startEnergy;
 
   // Build mutable copies of opponent ships
   const others = otherShips.map(o => ({
@@ -1455,14 +1517,45 @@ function simulate(startPos, startVel, startAngle, startAngVel, cmds, startCheckI
   }));
 
   let checkIdx = startCheckIdx !== undefined ? startCheckIdx : 0;
-  let trail = [{ x:primary.pos.x, y:primary.pos.y, angle:primary.angle, vx:primary.vel.x, vy:primary.vel.y, angVel:primary.angVel }];
+  let trail = [{ x:primary.pos.x, y:primary.pos.y, angle:primary.angle, vx:primary.vel.x, vy:primary.vel.y, angVel:primary.angVel, energy }];
   let checkpointEvents = [];
 
   for (let s = 0; s < CONFIG.STEPS; s++) {
 
+    // ── Energy management ───────────────────────────────────
+    //
+    //  1. Recharge: reactor adds energy, capped at capacity
+    //  2. Demand: sum energy cost of all active commands this step
+    //  3. Throttle: if demand > available energy, scale all forces
+    //     by (available / demand) so everything runs at reduced power
+    //  4. Deduct: subtract actual energy used
+    //
+    //  If energyCapacity is 0, energy is unlimited (throttle = 1.0).
+    //
+    let throttle = 1.0;
+    if (energyCapacity > 0) {
+      // Recharge
+      energy = Math.min(energy + energyRecharge, energyCapacity);
+
+      // Demand
+      const demand = computeStepDemand(cmds, s, energyCostFactor);
+
+      if (demand > 0) {
+        if (demand <= energy) {
+          // Enough energy — full power
+          energy -= demand;
+        } else {
+          // Not enough — throttle all systems equally
+          throttle = energy / demand;
+          energy = 0;
+        }
+      }
+    }
+
     // ── Apply commands to all ships ──────────────────────────
-    applyCommands(primary, cmds, s, CONFIG.DT);
+    applyCommands(primary, cmds, s, CONFIG.DT, throttle);
     for (const o of others) {
+      // Opponents run at full power — no energy tracking for them yet
       applyCommands(o, o.cmds, s, CONFIG.DT);
     }
 
@@ -1531,7 +1624,7 @@ function simulate(startPos, startVel, startAngle, startAngVel, cmds, startCheckI
     }
 
     // Record trail entries
-    trail.push({ x:primary.pos.x, y:primary.pos.y, angle:primary.angle, vx:primary.vel.x, vy:primary.vel.y, angVel:primary.angVel });
+    trail.push({ x:primary.pos.x, y:primary.pos.y, angle:primary.angle, vx:primary.vel.x, vy:primary.vel.y, angVel:primary.angVel, energy });
     for (const o of others) {
       o.trail.push({ x:o.pos.x, y:o.pos.y, angle:o.angle, vx:o.vel.x, vy:o.vel.y, angVel:o.angVel });
     }
@@ -1559,6 +1652,7 @@ function simulate(startPos, startVel, startAngle, startAngVel, cmds, startCheckI
     finalVel:    { ...primary.vel },
     finalAngle:  primary.angle,
     finalAngVel: primary.angVel,
+    finalEnergy: energy,
     checkpointEvents,
     finalCheckIdx: checkIdx,
     otherTrails: others.map(o => o.trail),
@@ -1576,6 +1670,7 @@ function simulate(startPos, startVel, startAngle, startAngVel, cmds, startCheckI
 //
 function buildSimParams() {
   const cfg = State.courseConfig;
+  const cls = SHIP_CLASSES[Pilot.shipClass] || SHIP_CLASSES.frigate;
   return {
     mass:             CONFIG.SHIP_MASS,
     moi:              CONFIG.SHIP_MOI,
@@ -1587,6 +1682,13 @@ function buildSimParams() {
     broadPhaseMult:   CONFIG.BROAD_PHASE_MULT,
     beacons:          BEACONS,
     checkpointOrder:  CHECKPOINT_ORDER,
+    // Energy — read from the ship's current state and class definition.
+    // startEnergy comes from State.ship.energy so the simulation picks
+    // up wherever the previous turn left off.
+    startEnergy:      State.ship.energy,
+    energyCapacity:   cls.energyCapacity,
+    energyRecharge:   cls.energyRecharge,
+    energyCostFactor: CONFIG.ENERGY_COST_FACTOR,
   };
 }
 
@@ -2080,9 +2182,18 @@ function drawPredictionFromResult(result) {
     const s = w2s(p.x, p.y);
     const a = 0.15 + (i / trail.length) * 0.5;
 
-    // Dot — gets brighter further into the future
+    // Dot color shifts based on energy level at this point in the turn.
+    // Green = plenty of power, amber = draining, red = throttled/empty.
+    const cls = SHIP_CLASSES[Pilot.shipClass] || SHIP_CLASSES.frigate;
+    const ePct = (p.energy !== undefined && cls.energyCapacity > 0)
+      ? p.energy / cls.energyCapacity
+      : 1;
+    const dotR = ePct > 0.6 ? 102 : ePct > 0.2 ? 255 : 255;
+    const dotG = ePct > 0.6 ? 255 : ePct > 0.2 ? 170 : 51;
+    const dotB = ePct > 0.6 ? 102 : ePct > 0.2 ? 0   : 0;
+
     mctx.beginPath(); mctx.arc(s.x,s.y,4,0,Math.PI*2);
-    mctx.fillStyle=`rgba(102,255,102,${a})`; mctx.fill();
+    mctx.fillStyle=`rgba(${dotR},${dotG},${dotB},${a})`; mctx.fill();
 
     // Blue heading tick — shows which way the ship faces at this point.
     // The angle is relative to the ship's current facing (world rotation handled by w2s).
@@ -2579,6 +2690,53 @@ function updateReadouts() {
     document.getElementById('r-db').textContent = '--- (NONE)';
   }
 
+  // Energy readout — current battery level as a clean percentage.
+  // During playback, reads from the trail. Otherwise from State.ship.
+  const cls = SHIP_CLASSES[Pilot.shipClass] || SHIP_CLASSES.frigate;
+  const cap = cls.energyCapacity || 1;
+  const liveEnergy = (UI.playing && UI.pbPositions.length > 0)
+    ? (UI.pbPositions[Math.min(UI.pbStep, UI.pbPositions.length-1)].energy ?? State.ship.energy)
+    : State.ship.energy;
+  const pct = Math.round((liveEnergy / cap) * 100);
+  const energyEl = document.getElementById('r-energy');
+  energyEl.textContent = `${pct}%`;
+  energyEl.style.color = pct > 60 ? 'var(--accent)' : pct > 20 ? 'var(--warning)' : 'var(--danger)';
+
+  // Plan cost — total energy demanded by all queued commands as % of capacity.
+  // Ignores throttling — shows the "sticker price" of the plan.
+  const costEl = document.getElementById('r-energy-cost');
+  const projEl = document.getElementById('r-energy-proj');
+
+  if (UI.playing || State.commands.length === 0) {
+    costEl.textContent = '—';
+    costEl.style.color = 'var(--text-dim)';
+    projEl.textContent = '—';
+    projEl.style.color = 'var(--text-dim)';
+  } else {
+    let totalDemand = 0;
+    for (let s = 0; s < CONFIG.STEPS; s++) {
+      totalDemand += computeStepDemand(State.commands, s, CONFIG.ENERGY_COST_FACTOR);
+    }
+    const costPct = Math.round((totalDemand / cap) * 100);
+    costEl.textContent = `${costPct}%`;
+    costEl.style.color = costPct > 80 ? 'var(--danger)' : costPct > 40 ? 'var(--warning)' : 'var(--accent)';
+
+    // Projected — actual end-of-turn battery from the prediction simulation,
+    // which accounts for throttling and reactor recharge.
+    if (predictionCache && predictionCache.trail && predictionCache.trail.length > 0) {
+      const finalTrailPt = predictionCache.trail[predictionCache.trail.length - 1];
+      const projEnergy = finalTrailPt.energy ?? liveEnergy;
+      const projPct = Math.round((projEnergy / cap) * 100);
+      projEl.textContent = `${projPct}%`;
+      projEl.style.color = projPct > 60 ? 'var(--accent)' : projPct > 20 ? 'var(--warning)' : 'var(--danger)';
+    } else {
+      const estEnergy = Math.max(0, liveEnergy - totalDemand + cls.energyRecharge * CONFIG.STEPS);
+      const estPct = Math.round((Math.min(estEnergy, cap) / cap) * 100);
+      projEl.textContent = `~${estPct}%`;
+      projEl.style.color = estPct > 60 ? 'var(--accent)' : estPct > 20 ? 'var(--warning)' : 'var(--danger)';
+    }
+  }
+
   // Boundary warning
   const distFromCenter = Math.hypot(dp.x, dp.y);
   const softR = (State.courseConfig.radius || 80) * CONFIG.SOFT_WALL_MULT;
@@ -2873,12 +3031,39 @@ function updateDerived() {
   if (!UI.selCmd||UI.selCmd.type!=='thrust') {
     document.getElementById('derived-readouts').style.display='none'; return;
   }
-  const dur    =(UI.selCmd.stopStep-UI.selCmd.startStep)*CONFIG.DT;
+  const steps  = UI.selCmd.stopStep - UI.selCmd.startStep;
+  const dur    = steps * CONFIG.DT;
   const n      = UI.selCmd.newtons || getTrackMaxThrust(UI.selCmd.track);
   const impulse= n*dur;
   document.getElementById('derived-readouts').style.display='block';
   document.getElementById('si-impulse').textContent=(impulse/1000).toFixed(1);
   document.getElementById('si-dv').textContent=(impulse/CONFIG.SHIP_MASS).toFixed(3);
+
+  // Energy rates as percentage of capacity per second (= per turn).
+  // Draw = how fast this command drains the battery.
+  // Regen = how fast the reactor refills it.
+  // Net = the difference — negative means draining.
+  const cls = SHIP_CLASSES[Pilot.shipClass] || SHIP_CLASSES.frigate;
+  const cap = cls.energyCapacity || 1;
+  const drawPerSec  = n * CONFIG.ENERGY_COST_FACTOR * CONFIG.STEPS;
+  const regenPerSec = cls.energyRecharge * CONFIG.STEPS;
+  const netPerSec   = regenPerSec - drawPerSec;
+  const drawPct  = Math.round((drawPerSec / cap) * 100);
+  const regenPct = Math.round((regenPerSec / cap) * 100);
+  const netPct   = Math.round((netPerSec / cap) * 100);
+
+  document.getElementById('si-draw').textContent  = `${drawPct}%`;
+  document.getElementById('si-regen').textContent  = `${regenPct}%`;
+  const netEl = document.getElementById('si-net');
+  netEl.textContent = `${netPct > 0 ? '+' : ''}${netPct}%`;
+  netEl.style.color = netPct >= 0 ? 'var(--accent)' : netPct > -50 ? 'var(--warning)' : 'var(--danger)';
+
+  // Total cost of this command as % of battery capacity
+  const totalCost = drawPerSec * dur;
+  const costPct   = Math.round((totalCost / cap) * 100);
+  const costEl = document.getElementById('si-energy-cost');
+  costEl.textContent = `${costPct}%`;
+  costEl.style.color = costPct > 80 ? 'var(--danger)' : costPct > 40 ? 'var(--warning)' : 'var(--accent)';
 }
 
 // Rotation derived readouts: angular impulse (kN·m·s) and delta-omega (°/s)
@@ -2887,7 +3072,8 @@ function updateRotDerived() {
   if (!UI.selCmd||UI.selCmd.type!=='rotate') {
     document.getElementById('derived-rot').style.display='none'; return;
   }
-  const dur       =(UI.selCmd.stopStep-UI.selCmd.startStep)*CONFIG.DT;
+  const steps     = UI.selCmd.stopStep - UI.selCmd.startStep;
+  const dur       = steps * CONFIG.DT;
   const torqueNm  =(UI.selCmd.torque||0)*1000;
   const angImpulse= torqueNm*dur;
   const dOmegaDeg =(angImpulse/CONFIG.SHIP_MOI)*180/Math.PI;
@@ -2895,6 +3081,29 @@ function updateRotDerived() {
   document.getElementById('derived-rot').style.display='block';
   document.getElementById('si-ang-impulse').textContent=(angImpulse/1000).toFixed(2);
   document.getElementById('si-dav').textContent=dir+' '+dOmegaDeg.toFixed(1);
+
+  // Energy rates as percentage of capacity per second
+  const cls = SHIP_CLASSES[Pilot.shipClass] || SHIP_CLASSES.frigate;
+  const cap = cls.energyCapacity || 1;
+  const drawPerSec  = torqueNm * CONFIG.ENERGY_COST_FACTOR * CONFIG.STEPS;
+  const regenPerSec = cls.energyRecharge * CONFIG.STEPS;
+  const netPerSec   = regenPerSec - drawPerSec;
+  const drawPct  = Math.round((drawPerSec / cap) * 100);
+  const regenPct = Math.round((regenPerSec / cap) * 100);
+  const netPct   = Math.round((netPerSec / cap) * 100);
+
+  document.getElementById('si-rot-draw').textContent  = `${drawPct}%`;
+  document.getElementById('si-rot-regen').textContent  = `${regenPct}%`;
+  const netEl = document.getElementById('si-rot-net');
+  netEl.textContent = `${netPct > 0 ? '+' : ''}${netPct}%`;
+  netEl.style.color = netPct >= 0 ? 'var(--accent)' : netPct > -50 ? 'var(--warning)' : 'var(--danger)';
+
+  // Total cost of this command as % of battery capacity
+  const totalCost = drawPerSec * dur;
+  const costPct   = Math.round((totalCost / cap) * 100);
+  const costEl = document.getElementById('si-rot-energy-cost');
+  costEl.textContent = `${costPct}%`;
+  costEl.style.color = costPct > 80 ? 'var(--danger)' : costPct > 40 ? 'var(--warning)' : 'var(--accent)';
 }
 
 // ── Command panel controls ───────────────────────────────────
@@ -2987,6 +3196,7 @@ function commitTurn(myResult, logEntry) {
   State.ship.vel    = myResult.finalVel;
   State.ship.angle  = myResult.finalAngle;
   State.ship.angVel = myResult.finalAngVel;
+  State.ship.energy = myResult.finalEnergy ?? State.ship.energy;
   State.nextCheckIdx = myResult.finalCheckIdx;
   State.replayLog.push(logEntry);
   State.lapTurns++;
@@ -3018,6 +3228,7 @@ function deserializeTrail(raw) {
   return Object.values(raw).map(p => ({
     x: p.x, y: p.y, angle: p.angle,
     vx: p.vx, vy: p.vy, angVel: p.angVel || 0,
+    energy: p.energy ?? 0,
   }));
 }
 
@@ -3077,6 +3288,7 @@ function hostWatchCommands(turnNum, myCommands, logEntry) {
     const finals = { [Lobby.mySlot]: {
       pos: myResult.finalPos, vel: myResult.finalVel,
       angle: myResult.finalAngle, angVel: myResult.finalAngVel,
+      energy: myResult.finalEnergy,
     }};
     const checks = { [Lobby.mySlot]: myResult.checkpointEvents };
 
@@ -3156,6 +3368,7 @@ function clientWatchResults(turnNum, logEntry) {
       finalVel:          myFinal?.vel    || State.ship.vel,
       finalAngle:        myFinal?.angle  ?? State.ship.angle,
       finalAngVel:       myFinal?.angVel ?? State.ship.angVel,
+      finalEnergy:       myFinal?.energy ?? State.ship.energy,
       checkpointEvents:  hostChecks,
       finalCheckIdx:     State.nextCheckIdx + hostChecks.length,
     };
@@ -3213,12 +3426,13 @@ document.getElementById('btn-exec').addEventListener('click', function() {
   this.disabled = true; UI.selCmd = null; updateSelPanel();
 
   const logEntry = {
-    turn:       State.turnNum,
-    startPos:   {...State.ship.pos},
-    startVel:   {...State.ship.vel},
-    startAngle: State.ship.angle,
-    startAngVel:State.ship.angVel,
-    commands:   State.commands.map(c => ({...c})),
+    turn:        State.turnNum,
+    startPos:    {...State.ship.pos},
+    startVel:    {...State.ship.vel},
+    startAngle:  State.ship.angle,
+    startAngVel: State.ship.angVel,
+    startEnergy: State.ship.energy,
+    commands:    State.commands.map(c => ({...c})),
   };
   const myCommands = State.commands.slice();
 
@@ -3285,6 +3499,7 @@ function playReplayTurn() {
   State.ship.vel    ={...entry.startVel};
   State.ship.angle  =entry.startAngle;
   State.ship.angVel =entry.startAngVel;
+  State.ship.energy =entry.startEnergy ?? State.ship.energy;
 
   // Restore opponents to their positions at the start of this turn
   // stored in entry.oppStartStates (added during applyTurnResult)
@@ -3323,6 +3538,7 @@ function playReplayTurn() {
       State.ship.vel   ={x:last.vx,y:last.vy};
       State.ship.angle = last.angle;
       State.ship.angVel= last.angVel||0;
+      State.ship.energy= last.energy ?? State.ship.energy;
 
       // Advance opponents to their end-of-turn positions
       (entry.oppTrails||[]).forEach((trail, i) => {
@@ -3381,6 +3597,7 @@ function showLapComplete() {
 // Reset lap — keeps the same course, returns ship to start
 function resetLap() {
   State.ship=startStateForSlot(Lobby.mySlot||'alpha');
+  // Energy is set by startStateForSlot from the ship class
   State.commands=[]; State.nextCheckIdx=0; State.lapTurns=0;
   State.lapComplete=false; State.replayLog=[]; State.turnNum=1;
   UI.selCmd=null; UI.playing=false; UI.panOffset={x:0,y:0};
