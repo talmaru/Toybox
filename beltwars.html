@@ -567,6 +567,7 @@ const FIREBASE_CONFIG = {
         <div class="ov-item" data-key="predict"> <span class="ov-check on">✓</span> PREDICTION</div>
         <div class="ov-item" data-key="heading"> <span class="ov-check on">✓</span> HEADING TICKS</div>
         <div class="ov-item" data-key="velArrow"><span class="ov-check on">✓</span> VELOCITY ARROW</div>
+        <div class="ov-item" data-key="reach">   <span class="ov-check">✓</span> REACH ENVELOPE</div>
         <div class="ov-item" data-key="labels">  <span class="ov-check on">✓</span> LABELS</div>
       </div>
     </div>
@@ -899,6 +900,34 @@ const SHIP_CLASSES = {
     description: 'Raw power, terrible handling. Commits to every maneuver three turns early.',
   },
 };
+
+// ── Per-track thrust limits ──────────────────────────────────
+//
+//  Returns the maximum thrust (Newtons) allowed for a given track
+//  based on the current ship class. This enforces the asymmetry
+//  designed into SHIP_CLASSES — main engines are strongest, retro
+//  is weaker, and lateral thrusters are weakest.
+//
+//  Called by the command panel, sequencer, and modal to set slider
+//  caps, and by the reach envelope to generate accurate profiles.
+//
+function getTrackMaxThrust(trackId) {
+  const cls = SHIP_CLASSES[Pilot.shipClass] || SHIP_CLASSES.frigate;
+  switch (trackId) {
+    case 'main':  return cls.mainThrust;
+    case 'retro': return cls.retroThrust;
+    case 'port':  return cls.sideThrust;
+    case 'stbd':  return cls.sideThrust;
+    default:      return cls.mainThrust;
+  }
+}
+
+// Returns the maximum torque (kN·m) for the current ship class.
+function getMaxTorque() {
+  const cls = SHIP_CLASSES[Pilot.shipClass] || SHIP_CLASSES.frigate;
+  return cls.maxTorque;
+}
+
 //
 //  Each track in the sequencer corresponds to one engine.
 //  lx / ly define the thrust direction in the ship's LOCAL space:
@@ -1144,7 +1173,8 @@ const UI = {
   // Which viewport overlays are currently visible.
   overlays: {
     grid: true, rings: false, beacons: true, rocks: true,
-    bounds: true, predict: true, heading: true, velArrow: true, labels: true,
+    bounds: true, predict: true, heading: true, velArrow: true,
+    reach: false, labels: true,
   },
 
   // Running command ID counter — gives each command a unique ID.
@@ -1823,6 +1853,13 @@ function render() {
   if (UI.overlays.rocks)    drawRocks();
   if (UI.overlays.beacons)  drawBeacons();
   if (UI.overlays.bounds)   drawBounds();
+  if (!UI.playing && UI.overlays.reach) {
+    if (UI.predictionDirty) {
+      drawReachability();
+    } else {
+      drawReachabilityFromCache();
+    }
+  }
   if (!UI.playing && UI.overlays.predict) {
     if (UI.predictionDirty) {
       drawPrediction();
@@ -2084,6 +2121,282 @@ function drawPredictionFromResult(result) {
   }
 }
 
+// ═══════════════════════════════════════════════════════════
+//  REACHABILITY ENVELOPE
+//
+//  Shows every position the ship could reach by end of turn
+//  as a filled polygon on the tactical display.
+//
+//  Method: brute-force sampling. We generate ~60 representative
+//  command profiles (combinations of thrust, rotation, and
+//  timing splits), run simulate() for each one, collect the
+//  final positions, compute the convex hull, and draw it.
+//
+//  This works because simulate() is fast (~0.1ms per call)
+//  and the convex hull of N points is O(N log N). The result
+//  is exact — no approximation or calculus needed.
+//
+//  The envelope is cached and only recomputed when the ship's
+//  state changes (same dirty-flag pattern as prediction).
+// ═══════════════════════════════════════════════════════════
+
+// Cache for the reachability envelope.
+// Stores { hull: [{x,y}...], drift: {x,y} } — both in world space.
+// Recomputed when predictionDirty is set (same trigger as prediction).
+let reachCache = null;
+
+// ── Generate command profiles ────────────────────────────────
+//
+//  Builds an array of command arrays, each representing one
+//  "what if the ship did THIS for the whole turn?" scenario.
+//
+//  The profiles fall into four categories:
+//
+//  A) No rotation — 9 profiles
+//     The 8 thrust directions (main, retro, port, stbd, and the
+//     four diagonals) plus drift (no thrust at all). These trace
+//     the reachable quad for a non-rotating ship.
+//
+//  B) Constant rotation + constant thrust — 18 profiles
+//     Full CW or CCW rotation for the whole turn, combined with
+//     each of the 8 thrust combos plus pure spin. The thrust
+//     direction sweeps as the ship rotates, producing curved
+//     trajectories that fill in the envelope's edges.
+//
+//  C) Rotate-then-burn sequences — ~32 profiles
+//     Spend part of the turn reorienting, then commit to a burn
+//     for the remainder. These fill in the gap between "full
+//     rotation" and "no rotation" — the curves that give the
+//     envelope its teardrop shape.
+//
+//     We sample 3 split points (25%, 50%, 75% of the turn spent
+//     rotating) × 2 rotation directions × the 4 diagonal thrust
+//     combos (which trace the boundary corners).
+//
+//  Returns an array of command arrays. Each inner array is a
+//  valid command list that can be passed directly to simulate().
+//
+function generateReachProfiles() {
+  const cls = SHIP_CLASSES[Pilot.shipClass] || SHIP_CLASSES.frigate;
+  const profiles = [];
+
+  // Helper: make a full-turn thrust command for a given track at max power
+  function thrustCmd(trackId, newtons) {
+    return { type:'thrust', track:trackId, startStep:0, stopStep:CONFIG.STEPS, newtons };
+  }
+
+  // Helper: make a rotation command spanning a time range
+  function rotCmd(start, stop, cw) {
+    return { type:'rotate', track:'rotate', startStep:start, stopStep:stop, torque:cls.maxTorque, cw };
+  }
+
+  // Helper: make a thrust command spanning a time range
+  function thrustRange(trackId, newtons, start, stop) {
+    return { type:'thrust', track:trackId, startStep:start, stopStep:stop, newtons };
+  }
+
+  // The 9 base thrust combos: drift + 4 cardinals + 4 diagonals.
+  // Each is an array of 0–2 thrust commands at max power for the full turn.
+  //
+  // Each track now has its own thrust cap from SHIP_CLASSES, enforced
+  // by the UI and clamped in command creation. The envelope uses these
+  // same per-track limits so it accurately reflects what the player
+  // can actually command.
+  //
+  const thrustCombos = [
+    [],                                                                                           // drift
+    [thrustCmd('main',  cls.mainThrust)],                                                         // full main
+    [thrustCmd('retro', cls.retroThrust)],                                                        // full retro
+    [thrustCmd('port',  cls.sideThrust)],                                                         // full port
+    [thrustCmd('stbd',  cls.sideThrust)],                                                         // full stbd
+    [thrustCmd('main',  cls.mainThrust), thrustCmd('port', cls.sideThrust)],                       // main + port
+    [thrustCmd('main',  cls.mainThrust), thrustCmd('stbd', cls.sideThrust)],                       // main + stbd
+    [thrustCmd('retro', cls.retroThrust), thrustCmd('port', cls.sideThrust)],                      // retro + port
+    [thrustCmd('retro', cls.retroThrust), thrustCmd('stbd', cls.sideThrust)],                      // retro + stbd
+  ];
+
+  // The 4 diagonal combos — used for rotate-then-burn profiles
+  // since they trace the boundary corners of the envelope.
+  const diagonalCombos = thrustCombos.slice(5); // last 4
+
+  // ── Category A: no rotation ──────────────────────────────
+  for (const combo of thrustCombos) {
+    profiles.push([...combo]);
+  }
+
+  // ── Category B: constant rotation + constant thrust ──────
+  for (const cw of [true, false]) {
+    for (const combo of thrustCombos) {
+      profiles.push([rotCmd(0, CONFIG.STEPS, cw), ...combo]);
+    }
+  }
+
+  // ── Category C: rotate-then-burn sequences ───────────────
+  //
+  //  For each split point, the ship rotates for the first N
+  //  steps, then burns all remaining engines for the rest.
+  //  This traces the curves where the ship reorients before
+  //  committing thrust in a new direction.
+  //
+  const splitPoints = [25, 50, 75];
+  for (const cw of [true, false]) {
+    for (const split of splitPoints) {
+      for (const combo of diagonalCombos) {
+        const cmds = [rotCmd(0, split, cw)];
+        // Add thrust commands that only fire AFTER the rotation phase
+        for (const tc of combo) {
+          cmds.push(thrustRange(tc.track, tc.newtons, split, CONFIG.STEPS));
+        }
+        profiles.push(cmds);
+      }
+    }
+  }
+
+  return profiles;
+}
+
+// ── Convex hull (Andrew's monotone chain) ────────────────────
+//
+//  Given an array of {x, y} points, returns the subset that
+//  forms the convex hull in counter-clockwise order.
+//
+//  This is O(N log N) — dominated by the sort. The scan itself
+//  is linear. For our ~60 points this is effectively instant.
+//
+//  The algorithm:
+//    1. Sort points by x (then y as tiebreaker)
+//    2. Build the lower hull by scanning left to right
+//    3. Build the upper hull by scanning right to left
+//    4. Concatenate, removing the duplicate endpoints
+//
+function convexHull(points) {
+  if (points.length <= 2) return points.slice();
+
+  // Sort by x, then by y as tiebreaker
+  const sorted = points.slice().sort((a, b) => a.x - b.x || a.y - b.y);
+
+  // Cross product of vectors OA and OB where O is the origin.
+  // Positive = counter-clockwise turn, negative = clockwise.
+  function cross(o, a, b) {
+    return (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+  }
+
+  // Build lower hull (left to right)
+  const lower = [];
+  for (const p of sorted) {
+    while (lower.length >= 2 && cross(lower[lower.length-2], lower[lower.length-1], p) <= 0) {
+      lower.pop();
+    }
+    lower.push(p);
+  }
+
+  // Build upper hull (right to left)
+  const upper = [];
+  for (let i = sorted.length - 1; i >= 0; i--) {
+    const p = sorted[i];
+    while (upper.length >= 2 && cross(upper[upper.length-2], upper[upper.length-1], p) <= 0) {
+      upper.pop();
+    }
+    upper.push(p);
+  }
+
+  // Remove last point of each half because it's repeated
+  lower.pop();
+  upper.pop();
+  return lower.concat(upper);
+}
+
+// ── Compute the reachability envelope ────────────────────────
+//
+//  Runs simulate() for each profile, collects final positions,
+//  and computes the convex hull. The result is an array of
+//  world-space points forming the envelope polygon.
+//
+function computeReachability() {
+  const profiles = generateReachProfiles();
+  const params   = buildSimParams();
+  const endpoints = [];
+
+  // The first profile (index 0) is always the drift case (no commands).
+  // We'll pull its final position out for the drift marker.
+  let driftPos = null;
+
+  for (let i = 0; i < profiles.length; i++) {
+    const result = simulate(
+      State.ship.pos, State.ship.vel,
+      State.ship.angle, State.ship.angVel,
+      profiles[i], State.nextCheckIdx, State.rocks, [],
+      params
+    );
+    const fp = { x: result.finalPos.x, y: result.finalPos.y };
+    endpoints.push(fp);
+    if (i === 0) driftPos = fp;
+  }
+
+  return { hull: convexHull(endpoints), drift: driftPos };
+}
+
+// ── Draw the reachability envelope ───────────────────────────
+//
+//  Draws the cached hull as a translucent filled polygon with
+//  a dashed border. The fill uses the player's colour at low
+//  opacity so it doesn't obscure the tactical display.
+//
+//  Also marks the drift point (zero-thrust endpoint) with a
+//  small × so the player can see where they'll end up if they
+//  do nothing.
+//
+function drawReachability() {
+  if (UI.predictionDirty || !reachCache) {
+    reachCache = computeReachability();
+  }
+  drawReachabilityFromCache();
+}
+
+function drawReachabilityFromCache() {
+  if (!reachCache || !reachCache.hull || reachCache.hull.length < 3) return;
+
+  // Project hull points to screen space
+  const screenPts = reachCache.hull.map(p => w2s(p.x, p.y));
+
+  // Filled polygon — player colour at low opacity
+  mctx.beginPath();
+  screenPts.forEach((p, i) => i === 0 ? mctx.moveTo(p.x, p.y) : mctx.lineTo(p.x, p.y));
+  mctx.closePath();
+
+  // Parse player colour and apply as fill with transparency
+  mctx.fillStyle = Pilot.colour + '12';    // ~7% opacity
+  mctx.fill();
+
+  // Dashed border
+  mctx.strokeStyle = Pilot.colour + '44';  // ~27% opacity
+  mctx.lineWidth = 1;
+  mctx.setLineDash([4, 4]);
+  mctx.stroke();
+  mctx.setLineDash([]);
+
+  // Drift point marker — shows where the ship ends up with no thrust.
+  // Cached alongside the hull so we don't re-simulate every frame.
+  if (reachCache.drift) {
+    const ds = w2s(reachCache.drift.x, reachCache.drift.y);
+
+    // Small × marker
+    const sz = 4;
+    mctx.strokeStyle = Pilot.colour + '88';
+    mctx.lineWidth = 1.5;
+    mctx.beginPath();
+    mctx.moveTo(ds.x - sz, ds.y - sz); mctx.lineTo(ds.x + sz, ds.y + sz);
+    mctx.moveTo(ds.x + sz, ds.y - sz); mctx.lineTo(ds.x - sz, ds.y + sz);
+    mctx.stroke();
+
+    // Label
+    mctx.fillStyle = Pilot.colour + '66';
+    mctx.font = '8px Courier New';
+    mctx.fillText('DRIFT', ds.x + 8, ds.y + 3);
+  }
+}
+
+
 // Ship — always drawn at screen center (+ pan offset).
 // The world rotates around it, not the other way around.
 // During playback, velocity is read from the trail so the
@@ -2321,9 +2634,9 @@ function renderSeq() {
       sqx.strokeRect(x1+0.5,ty+2.5,bw-1,CONFIG.TRACK_H-5);
       if (bw>28) {
         sqx.fillStyle=tr.bright; sqx.font='8px Courier New';
-        const n=c.newtons||50000, dur=(c.stopStep-c.startStep)*CONFIG.DT;
+        const n=c.newtons||0, dur=(c.stopStep-c.startStep)*CONFIG.DT;
         const lbl=tr.type==='rotate'
-          ? `${(c.torque||25).toFixed(0)}kN·m ${c.cw?'CW':'CCW'}`
+          ? `${(c.torque||0).toFixed(0)}kN·m ${c.cw?'CW':'CCW'}`
           : `${(n/1000).toFixed(0)}kN · ${(n*dur/1000).toFixed(1)}kN·s`;
         sqx.fillText(lbl,x1+5,ty+CONFIG.TRACK_H/2+3.5);
       }
@@ -2424,14 +2737,16 @@ seqC.addEventListener('mousedown', e => {
   if (h.type==='create') {
     const tr=TRACKS[h.ti], s=x2s(x);
     const rawTorque=parseFloat(document.getElementById('deg-input').value)||0;
+    const maxT = getMaxTorque();
     const cmd={
       id:        UI.nextCmdId(),
       type:      tr.type,
       track:     tr.id,
       startStep: s,
       stopStep:  Math.min(CONFIG.STEPS, s+1),
-      newtons:   parseFloat(document.getElementById('mag-slider').value),
-      torque:    Math.abs(rawTorque)||25,
+      // New commands default to max thrust for their track
+      newtons:   getTrackMaxThrust(tr.id),
+      torque:    Math.min(Math.abs(rawTorque) || maxT, maxT),
       cw:        rawTorque>=0,
     };
     State.commands.push(cmd); UI.drag.cmd=cmd;
@@ -2496,15 +2811,35 @@ function updateSelPanel() {
     tc.style.display='flex'; rc.style.display='none';
     document.getElementById('derived-readouts').style.display='none';
     document.getElementById('derived-rot').style.display='none';
-    const n=UI.selCmd.newtons||50000;
-    document.getElementById('mag-slider').value=n;
+
+    // Set slider max to this track's limit — main, retro, and lateral
+    // engines each have different caps defined in SHIP_CLASSES.
+    const maxN = getTrackMaxThrust(UI.selCmd.track);
+    const slider = document.getElementById('mag-slider');
+    slider.max = maxN;
+
+    // Clamp the command's value if it exceeds the new cap
+    // (can happen if the player switches ship class mid-session)
+    const n = Math.min(UI.selCmd.newtons || maxN, maxN);
+    UI.selCmd.newtons = n;
+    slider.value = n;
     document.getElementById('mag-disp').textContent=(n/1000).toFixed(0)+' kN';
   } else {
     tc.style.display='none'; rc.style.display='flex';
-    const signed=(UI.selCmd.cw?1:-1)*(UI.selCmd.torque||25);
-    document.getElementById('deg-input').value=signed;
+
+    // Set torque slider limits from ship class
+    const maxT = getMaxTorque();
+    const degInput = document.getElementById('deg-input');
+    degInput.min = -maxT;
+    degInput.max = maxT;
+
+    // Clamp torque value to class limit
+    const torque = Math.min(UI.selCmd.torque || maxT, maxT);
+    UI.selCmd.torque = torque;
+    const signed=(UI.selCmd.cw?1:-1)*torque;
+    degInput.value=signed;
     const disp=document.getElementById('torque-disp');
-    disp.textContent=(UI.selCmd.cw?'↻ ':'↺ ')+(UI.selCmd.torque||25).toFixed(0)+' kN·m';
+    disp.textContent=(UI.selCmd.cw?'↻ ':'↺ ')+torque.toFixed(0)+' kN·m';
     disp.style.color='var(--warning)';
     document.getElementById('btn-cw').classList.toggle('active',UI.selCmd.cw);
     document.getElementById('btn-ccw').classList.toggle('active',!UI.selCmd.cw);
@@ -2539,7 +2874,7 @@ function updateDerived() {
     document.getElementById('derived-readouts').style.display='none'; return;
   }
   const dur    =(UI.selCmd.stopStep-UI.selCmd.startStep)*CONFIG.DT;
-  const n      = UI.selCmd.newtons||50000;
+  const n      = UI.selCmd.newtons || getTrackMaxThrust(UI.selCmd.track);
   const impulse= n*dur;
   document.getElementById('derived-readouts').style.display='block';
   document.getElementById('si-impulse').textContent=(impulse/1000).toFixed(1);
@@ -2565,7 +2900,7 @@ function updateRotDerived() {
 // ── Command panel controls ───────────────────────────────────
 
 // Mark prediction dirty — call whenever commands change
-function markPredictionDirty() { UI.predictionDirty = true; predictionCache = null; }
+function markPredictionDirty() { UI.predictionDirty = true; predictionCache = null; reachCache = null; }
 
 document.getElementById('mag-slider').addEventListener('input',function(){
   const n=parseFloat(this.value);
@@ -3248,9 +3583,16 @@ function openModal(cmd) {
   document.getElementById('m-row-mag').style.display=isThr?'flex':'none';
   document.getElementById('m-row-deg').style.display=isThr?'none':'flex';
   document.getElementById('m-row-dir').style.display=isThr?'none':'flex';
-  if (isThr) { document.getElementById('m-mag').value=cmd.newtons||50000; }
-  else {
-    document.getElementById('m-deg').value=cmd.torque||25;
+  if (isThr) {
+    const maxN = getTrackMaxThrust(cmd.track);
+    const mMag = document.getElementById('m-mag');
+    mMag.max   = maxN;
+    mMag.value = Math.min(cmd.newtons || maxN, maxN);
+  } else {
+    const maxT = getMaxTorque();
+    const mDeg = document.getElementById('m-deg');
+    mDeg.max   = maxT;
+    mDeg.value = Math.min(cmd.torque || maxT, maxT);
     document.getElementById('m-ccw').classList.toggle('active',!cmd.cw);
     document.getElementById('m-cw').classList.toggle('active',cmd.cw);
   }
@@ -3270,9 +3612,11 @@ function applyModal() {
   modalTarget.startStep=Math.max(0,Math.min(CONFIG.STEPS-1,start));
   modalTarget.stopStep =Math.max(1,Math.min(CONFIG.STEPS,stop));
   if (modalTarget.type==='thrust') {
-    modalTarget.newtons=parseFloat(document.getElementById('m-mag').value)||50000;
+    const maxN = getTrackMaxThrust(modalTarget.track);
+    modalTarget.newtons=Math.min(parseFloat(document.getElementById('m-mag').value)||maxN, maxN);
   } else {
-    modalTarget.torque=Math.min(25,Math.max(1,parseFloat(document.getElementById('m-deg').value)||25));
+    const maxT = getMaxTorque();
+    modalTarget.torque=Math.min(maxT, Math.max(1,parseFloat(document.getElementById('m-deg').value)||maxT));
     modalTarget.cw=document.getElementById('m-cw').classList.contains('active');
   }
   selectCmd(modalTarget); closeModal(); markPredictionDirty(); renderSeq(); setStatus('COMMAND UPDATED');
@@ -3309,22 +3653,20 @@ const Pilot = {
 };
 
 // Apply a ship class to CONFIG so all physics and UI systems pick it up.
+//
+//  Sets the global CONFIG values (mass, moi, radius) that the simulation
+//  reads for the local player's ship.
+//
+//  Slider caps are NOT set here — they're now set dynamically per-track
+//  in updateSelPanel() and openModal() using getTrackMaxThrust() and
+//  getMaxTorque(). This ensures each engine track gets its own correct
+//  limit based on the ship class.
+//
 function applyShipClass(classId) {
   const cls = SHIP_CLASSES[classId] || SHIP_CLASSES.frigate;
   CONFIG.SHIP_MASS   = cls.mass;
   CONFIG.SHIP_MOI    = cls.moi;
   CONFIG.SHIP_RADIUS = cls.radius;
-
-  // Update sequencer mag-slider and modal to reflect class thrust limits
-  // Main engine sets the overall cap — other tracks are limited per-track at command creation
-  const magSlider = document.getElementById('mag-slider');
-  const mMag      = document.getElementById('m-mag');
-  const degInput  = document.getElementById('deg-input');
-  const mDeg      = document.getElementById('m-deg');
-  if (magSlider) { magSlider.max = cls.mainThrust; }
-  if (mMag)      { mMag.max      = cls.mainThrust; }
-  if (degInput)  { degInput.min  = -cls.maxTorque; degInput.max = cls.maxTorque; }
-  if (mDeg)      { mDeg.max      = cls.maxTorque; }
 }
 
 // Enforce uppercase on name input
