@@ -858,6 +858,32 @@ const CONFIG = {
   CHECKPOINT_SEED_OFFSET: 9999,
   BEACON_PULSE_SPEED:     1.8,
 
+  // ── Rock physics ───────────────────────────────────────────
+  //
+  //  Rocks drift through the arena with initial velocities assigned
+  //  at generation. They collide with each other (circle-circle)
+  //  and with ships (polygon). When a rock exits the arena boundary
+  //  it wraps to the opposite side.
+  //
+  //  ROCK_MIN_SPEED / MAX_SPEED: range for initial velocity magnitude.
+  //  ROCK_DENSITY: kg/m³ — mass = density × (4/3)π × r³. Rocky
+  //    asteroid density (~2500) gives cubic mass scaling so big rocks
+  //    are dramatically heavier than small ones.
+  //  ROCK_RESTITUTION: velocity preservation on rock-rock bounce.
+  //    0.9 = near-elastic, very little energy lost.
+  //  ROCK_MIN_SPEED_FLOOR: after a collision, if a rock's speed drops
+  //    below this, it's scaled back up preserving direction. Prevents
+  //    the field from stagnating.
+  //  ROCK_HASH_CELL: spatial hash grid cell size in km. Should be
+  //    roughly 2× the largest possible rock radius for good coverage.
+  //
+  ROCK_MIN_SPEED:       0.3,     // km/s
+  ROCK_MAX_SPEED:       1.5,     // km/s
+  ROCK_DENSITY:         2500,    // kg/m³
+  ROCK_RESTITUTION:     0.9,
+  ROCK_MIN_SPEED_FLOOR: 0.1,    // km/s
+  ROCK_HASH_CELL:       20,     // km
+
   // ── Energy ─────────────────────────────────────────────────
   //
   //  ENERGY_COST_FACTOR: energy consumed per Newton (or Newton-metre
@@ -1193,6 +1219,11 @@ const UI = {
   // Prediction dirty flag — prediction only recomputes on input change, not every frame
   predictionDirty: true,
 
+  // Reachability dirty flag — separate from prediction because the reach
+  // envelope only depends on ship state (pos, vel, angle, energy), not
+  // on queued commands. Recomputes once at turn start, not on every edit.
+  reachDirty: true,
+
   // Prediction dots — clickable circles drawn on the prediction path.
   // Rebuilt each frame. Not persisted. Format: [{sx, sy, step}]
   predDots: [],
@@ -1200,6 +1231,10 @@ const UI = {
   // Opponent playback trails — one per opponent, indexed to match State.opponents.
   // Populated during multiplayer turn resolution, cleared after playback.
   oppTrails: [],
+
+  // Rock snapshots during playback — array of compact rock state arrays,
+  // one per timestep. Indexed by UI.pbStep to animate rocks during turn execution.
+  pbRockSnapshots: [],
 
   // Which viewport overlays are currently visible.
   overlays: {
@@ -1411,6 +1446,11 @@ function bounceOffSurface(ship, nx, ny, pushDist, restitution) {
 //  inside) and a swept-circle test (for fast-moving ships that
 //  would pass through thin surfaces between substeps).
 //
+//  When a collision occurs, the ship bounces off the rock AND
+//  the rock receives an impulse from the ship's momentum. A scout
+//  barely nudges a big rock; a hauler at speed can scatter small
+//  rocks across the field.
+//
 //  Returns true if a collision occurred.
 //
 function checkRockCollisions(ship, prevX, prevY, rocks, epsilon, broadPhaseMult, restitution) {
@@ -1429,6 +1469,8 @@ function checkRockCollisions(ship, prevX, prevY, rocks, epsilon, broadPhaseMult,
     // Narrow phase 1: is the ship currently inside the polygon?
     if (pointInPoly(ship.pos.x, ship.pos.y, rock.verts)) {
       const pushOut = findNearestEdgePushOut(ship.pos.x, ship.pos.y, rock.verts);
+      // Transfer momentum to rock before bouncing the ship
+      if (rock.mass) impartMomentumToRock(rock, ship.vel, ship.mass, pushOut.nx, pushOut.ny, restitution);
       bounceOffSurface(ship, pushOut.nx, pushOut.ny, pushOut.dist + ship.radius + epsilon, restitution);
       return true;
     }
@@ -1436,6 +1478,8 @@ function checkRockCollisions(ship, prevX, prevY, rocks, epsilon, broadPhaseMult,
     // Narrow phase 2: swept circle test along the movement segment
     const hit = sweepCirclePoly(prevX, prevY, ship.pos.x, ship.pos.y, ship.radius, rock.verts);
     if (hit) {
+      // Transfer momentum to rock
+      if (rock.mass) impartMomentumToRock(rock, ship.vel, ship.mass, hit.nx, hit.ny, restitution);
       ship.pos.x = prevX + hit.t * (ship.pos.x - prevX) + hit.nx * (ship.radius + epsilon);
       ship.pos.y = prevY + hit.t * (ship.pos.y - prevY) + hit.ny * (ship.radius + epsilon);
       const dot = ship.vel.x * hit.nx + ship.vel.y * hit.ny;
@@ -1516,9 +1560,20 @@ function simulate(startPos, startVel, startAngle, startAngVel, cmds, startCheckI
     trail:  [{ x:o.pos.x, y:o.pos.y, angle:o.angle||0, vx:o.vel.x, vy:o.vel.y, angVel:o.angVel||0 }],
   }));
 
+  // Deep-copy rocks so the simulation can mutate positions/velocities
+  // without affecting State.rocks. Each rock moves independently and
+  // can collide with other rocks and ships during the turn.
+  const simRocks = deepCopyRocks(rocks);
+
   let checkIdx = startCheckIdx !== undefined ? startCheckIdx : 0;
   let trail = [{ x:primary.pos.x, y:primary.pos.y, angle:primary.angle, vx:primary.vel.x, vy:primary.vel.y, angVel:primary.angVel, energy }];
   let checkpointEvents = [];
+
+  // Rock snapshots — one entry per trail point, each an array of
+  // compact rock states {x, y, vx, vy}. Used during playback to
+  // animate rocks moving in sync with the ship trail.
+  const snapshotRocks = () => simRocks.map(r => ({ x:r.x, y:r.y, vx:r.vx, vy:r.vy }));
+  let rockSnapshots = [snapshotRocks()];
 
   for (let s = 0; s < CONFIG.STEPS; s++) {
 
@@ -1559,6 +1614,15 @@ function simulate(startPos, startVel, startAngle, startAngVel, cmds, startCheckI
       applyCommands(o, o.cmds, s, CONFIG.DT);
     }
 
+    // ── Advance rocks ───────────────────────────────────────
+    //
+    //  Rocks move, collide with each other, wrap at the boundary,
+    //  and update their world-space vertices — all in one call.
+    //  This happens once per timestep (not per substep) because
+    //  rocks move slowly relative to ships.
+    //
+    advanceRocks(simRocks, CONFIG.DT, hardR);
+
     // ── Adaptive substeps ───────────────────────────────────
     //
     //  At high speeds the ship can move several km per timestep,
@@ -1586,14 +1650,14 @@ function simulate(startPos, startVel, startAngle, startAngVel, cmds, startCheckI
       }
 
       // ── Rock collisions ──────────────────────────────────
-      if (checkRockCollisions(primary, prevX, prevY, rocks, epsilon, broadPhaseMult, restitution)) {
+      if (checkRockCollisions(primary, prevX, prevY, simRocks, epsilon, broadPhaseMult, restitution)) {
         collided = true;
         break;
       }
       for (const o of others) {
         const oPrevX = o.pos.x - o.vel.x * subDT;
         const oPrevY = o.pos.y - o.vel.y * subDT;
-        checkRockCollisions(o, oPrevX, oPrevY, rocks, epsilon, broadPhaseMult, restitution);
+        checkRockCollisions(o, oPrevX, oPrevY, simRocks, epsilon, broadPhaseMult, restitution);
       }
 
       // ── Ship-to-ship collision ───────────────────────────
@@ -1623,8 +1687,9 @@ function simulate(startPos, startVel, startAngle, startAngVel, cmds, startCheckI
       }
     }
 
-    // Record trail entries
+    // Record trail entries and rock snapshot
     trail.push({ x:primary.pos.x, y:primary.pos.y, angle:primary.angle, vx:primary.vel.x, vy:primary.vel.y, angVel:primary.angVel, energy });
+    rockSnapshots.push(snapshotRocks());
     for (const o of others) {
       o.trail.push({ x:o.pos.x, y:o.pos.y, angle:o.angle, vx:o.vel.x, vy:o.vel.y, angVel:o.angVel });
     }
@@ -1653,6 +1718,8 @@ function simulate(startPos, startVel, startAngle, startAngVel, cmds, startCheckI
     finalAngle:  primary.angle,
     finalAngVel: primary.angVel,
     finalEnergy: energy,
+    finalRocks:  simRocks,
+    rockSnapshots,
     checkpointEvents,
     finalCheckIdx: checkIdx,
     otherTrails: others.map(o => o.trail),
@@ -1718,20 +1785,39 @@ function seededRand(seed, i) {
   return x - Math.floor(x);
 }
 
-// Build the polygon vertices for a rock in world space.
+// Build the LOCAL polygon vertices for a rock — offsets from center.
 // 11 points around a circle, each jittered outward 55–115% of the radius.
 // The jitter is seeded so the same rock always has the same shape.
-function buildRockVerts(rock) {
+// These are computed ONCE at generation and never change — the rock's
+// shape is fixed, only its position moves.
+function buildRockLocalVerts(rock) {
   const pts = 11, verts = [];
   for (let i = 0; i < pts; i++) {
     const a      = (i / pts) * Math.PI * 2;
     const jitter = 0.55 + seededRand(rock.seed, i) * 0.6;
     verts.push({
-      x: rock.x + Math.cos(a) * rock.r * jitter,
-      y: rock.y + Math.sin(a) * rock.r * jitter,
+      x: Math.cos(a) * rock.r * jitter,
+      y: Math.sin(a) * rock.r * jitter,
     });
   }
   return verts;
+}
+
+// Compute world-space vertices by translating local verts to the rock's
+// current position. Called after every position change (movement, wrap).
+// This is just addition — no trig, so it's cheap to call every timestep.
+function updateRockWorldVerts(rock) {
+  for (let i = 0; i < rock.localVerts.length; i++) {
+    rock.verts[i].x = rock.x + rock.localVerts[i].x;
+    rock.verts[i].y = rock.y + rock.localVerts[i].y;
+  }
+}
+
+// Legacy wrapper — builds both local and world verts from scratch.
+// Used at generation time. After that, only updateRockWorldVerts is needed.
+function buildRockVerts(rock) {
+  rock.localVerts = buildRockLocalVerts(rock);
+  return rock.localVerts.map(lv => ({ x: rock.x + lv.x, y: rock.y + lv.y }));
 }
 
 // Segment intersection: does segment AB intersect segment CD?
@@ -1928,12 +2014,224 @@ function generateRocks(cfg) {
     }
 
     if (valid) {
-      const rock = { x, y, r, vr: r, seed: placed.length + 1, verts: [] };
-      rock.verts = buildRockVerts(rock);
+      // Velocity — random direction, magnitude in [MIN_SPEED, MAX_SPEED]
+      const speed = CONFIG.ROCK_MIN_SPEED + rng() * (CONFIG.ROCK_MAX_SPEED - CONFIG.ROCK_MIN_SPEED);
+      const angle = rng() * Math.PI * 2;
+      const vx    = Math.cos(angle) * speed;
+      const vy    = Math.sin(angle) * speed;
+
+      // Mass — density × spherical volume. Cubic scaling means a rock
+      // with 2× the radius has 8× the mass. This makes big rocks
+      // nearly immovable while small rocks scatter dramatically.
+      // r is in km, convert to m for the mass calculation, then the
+      // actual mass value is in kg. At density 2500 and r=3km this
+      // gives ~280 billion kg — physically reasonable for an asteroid.
+      const rMeters = r * 1000;
+      const mass    = CONFIG.ROCK_DENSITY * (4/3) * Math.PI * rMeters * rMeters * rMeters;
+
+      const rock = {
+        x, y, r,
+        vx, vy,
+        mass,
+        seed:       placed.length + 1,
+        localVerts: [],
+        verts:      [],
+      };
+      rock.localVerts = buildRockLocalVerts(rock);
+      rock.verts = rock.localVerts.map(lv => ({ x: rock.x + lv.x, y: rock.y + lv.y }));
       placed.push(rock);
     }
   }
   return placed;
+}
+
+
+// ═══════════════════════════════════════════════════════════
+//  ROCK PHYSICS
+//
+//  Rocks drift through the arena during simulation. Each timestep:
+//    1. Advance positions by velocity × dt
+//    2. Rebuild spatial hash grid
+//    3. Resolve rock-rock collisions (circle-circle, elastic)
+//    4. Wrap rocks that exit the arena boundary
+//    5. Enforce minimum speed floor
+//    6. Update world-space vertices for collision/rendering
+//
+//  The spatial hash grid avoids O(N²) pair checks. The arena is
+//  divided into cells of ROCK_HASH_CELL km. Each rock maps to one
+//  cell. Collision checks only test against rocks in the same cell
+//  and the 8 neighbors — typically 0–2 rocks per check instead of 80.
+// ═══════════════════════════════════════════════════════════
+
+// ── Spatial hash grid ────────────────────────────────────────
+//
+//  Build: drop each rock into a cell based on its position.
+//  Query: return all rock indices in a cell and its 8 neighbors.
+//  Rebuild is O(N), query is O(1) per cell.
+//
+function buildSpatialHash(rocks, cellSize) {
+  const grid = {};
+  for (let i = 0; i < rocks.length; i++) {
+    const cx = Math.floor(rocks[i].x / cellSize);
+    const cy = Math.floor(rocks[i].y / cellSize);
+    const key = cx + ',' + cy;
+    if (!grid[key]) grid[key] = [];
+    grid[key].push(i);
+  }
+  return grid;
+}
+
+function queryNearby(grid, rock, cellSize) {
+  const cx = Math.floor(rock.x / cellSize);
+  const cy = Math.floor(rock.y / cellSize);
+  const result = [];
+  for (let dx = -1; dx <= 1; dx++) {
+    for (let dy = -1; dy <= 1; dy++) {
+      const key = (cx+dx) + ',' + (cy+dy);
+      if (grid[key]) {
+        for (const idx of grid[key]) result.push(idx);
+      }
+    }
+  }
+  return result;
+}
+
+// ── Rock-rock elastic collision ──────────────────────────────
+//
+//  Circle-circle test using each rock's radius. If overlapping,
+//  push apart proportional to mass and apply elastic impulse.
+//  Same math as resolveShipCollision but between two rocks.
+//
+//  Returns true if a collision was resolved.
+//
+function resolveRockCollision(r1, r2, restitution) {
+  const dx   = r1.x - r2.x;
+  const dy   = r1.y - r2.y;
+  const dist = Math.hypot(dx, dy);
+  const minD = r1.r + r2.r;
+  if (dist >= minD || dist < 0.001) return false;
+
+  const nx = dx/dist, ny = dy/dist;
+
+  // Push apart weighted by mass
+  const overlap = minD - dist;
+  const mt = r1.mass + r2.mass;
+  r1.x += nx * overlap * (r2.mass/mt);
+  r1.y += ny * overlap * (r2.mass/mt);
+  r2.x -= nx * overlap * (r1.mass/mt);
+  r2.y -= ny * overlap * (r1.mass/mt);
+
+  // Relative velocity along normal
+  const dvx = r1.vx - r2.vx;
+  const dvy = r1.vy - r2.vy;
+  const dot = dvx*nx + dvy*ny;
+  if (dot >= 0) return false; // already separating
+
+  // Elastic impulse scaled by restitution
+  const impulse = (1 + restitution) * dot / mt;
+  r1.vx -= impulse * r2.mass * nx;
+  r1.vy -= impulse * r2.mass * ny;
+  r2.vx += impulse * r1.mass * nx;
+  r2.vy += impulse * r1.mass * ny;
+
+  return true;
+}
+
+// ── Ship-rock collision with momentum transfer ───────────────
+//
+//  When a ship hits a rock, both objects should react. The existing
+//  bounceOffSurface only moves the ship. This function also imparts
+//  momentum to the rock based on the ship's mass and velocity.
+//
+//  The rock is treated as a circle (its radius) for the impulse
+//  calculation, even though the ship collides with its polygon.
+//
+function impartMomentumToRock(rock, shipVel, shipMass, normalX, normalY, restitution) {
+  const mt = shipMass + rock.mass;
+  const dvx = shipVel.x - rock.vx;
+  const dvy = shipVel.y - rock.vy;
+  const dot = dvx * normalX + dvy * normalY;
+  if (dot >= 0) return; // already separating
+
+  const impulse = (1 + restitution) * dot / mt;
+  // Only apply to rock — ship response is handled by bounceOffSurface
+  rock.vx += impulse * shipMass * normalX;
+  rock.vy += impulse * shipMass * normalY;
+}
+
+// ── Advance all rocks one timestep ───────────────────────────
+//
+//  Moves rocks, resolves rock-rock collisions via spatial hash,
+//  wraps rocks at the arena boundary, enforces minimum speed,
+//  and updates world vertices.
+//
+//  Called once per timestep inside simulate(). The rocks array
+//  is mutated in place (it's already a deep copy at that point).
+//
+function advanceRocks(rocks, dt, hardWallRadius) {
+  const cellSize    = CONFIG.ROCK_HASH_CELL;
+  const restitution = CONFIG.ROCK_RESTITUTION;
+  const speedFloor  = CONFIG.ROCK_MIN_SPEED_FLOOR;
+
+  // 1. Advance positions
+  for (const rock of rocks) {
+    rock.x += rock.vx * dt;
+    rock.y += rock.vy * dt;
+  }
+
+  // 2. Build spatial hash and resolve rock-rock collisions
+  const grid = buildSpatialHash(rocks, cellSize);
+  const checked = new Set(); // track checked pairs to avoid duplicates
+
+  for (let i = 0; i < rocks.length; i++) {
+    const nearby = queryNearby(grid, rocks[i], cellSize);
+    for (const j of nearby) {
+      if (j <= i) continue; // skip self and already-checked pairs
+      const pairKey = i * rocks.length + j;
+      if (checked.has(pairKey)) continue;
+      checked.add(pairKey);
+      resolveRockCollision(rocks[i], rocks[j], restitution);
+    }
+  }
+
+  // 3. Wrap at boundary and enforce speed floor
+  for (const rock of rocks) {
+    const dist = Math.hypot(rock.x, rock.y);
+    if (dist > hardWallRadius + rock.r) {
+      // Wrap to opposite side — teleport across the origin
+      rock.x = -rock.x * (hardWallRadius - rock.r) / dist;
+      rock.y = -rock.y * (hardWallRadius - rock.r) / dist;
+    }
+
+    // Speed floor — if a collision drained too much velocity,
+    // scale it back up to the minimum, preserving direction.
+    const speed = Math.hypot(rock.vx, rock.vy);
+    if (speed > 0.001 && speed < speedFloor) {
+      const scale = speedFloor / speed;
+      rock.vx *= scale;
+      rock.vy *= scale;
+    }
+
+    // 4. Update world vertices from local offsets
+    updateRockWorldVerts(rock);
+  }
+}
+
+// ── Deep-copy the rock array for simulation ──────────────────
+//
+//  simulate() needs mutable copies so it doesn't destroy the
+//  original State.rocks. Each rock's local verts are shared
+//  (they never change), but world verts get new objects.
+//
+function deepCopyRocks(rocks) {
+  return rocks.map(r => ({
+    x: r.x, y: r.y, r: r.r,
+    vx: r.vx || 0, vy: r.vy || 0,
+    mass: r.mass || 1e12,
+    seed: r.seed,
+    localVerts: r.localVerts, // shared — never mutated
+    verts: r.localVerts.map(lv => ({ x: r.x + lv.x, y: r.y + lv.y })),
+  }));
 }
 
 
@@ -1956,11 +2254,11 @@ function render() {
   if (UI.overlays.beacons)  drawBeacons();
   if (UI.overlays.bounds)   drawBounds();
   if (!UI.playing && UI.overlays.reach) {
-    if (UI.predictionDirty) {
-      drawReachability();
-    } else {
-      drawReachabilityFromCache();
+    if (UI.reachDirty) {
+      reachCache = computeReachability();
+      UI.reachDirty = false;
     }
+    drawReachabilityFromCache();
   }
   if (!UI.playing && UI.overlays.predict) {
     if (UI.predictionDirty) {
@@ -2049,14 +2347,70 @@ function drawBounds() {
 
 // Rocks — draw each as its polygon vertices projected to screen space.
 // The visual shape IS the collision shape (same verts array).
+//
+// During playback, rock positions come from UI.pbRockSnapshots so they
+// animate in sync with the ship trail. Outside playback, rocks are drawn
+// from State.rocks at their current committed positions.
+//
+// Each rock also gets a velocity arrow — a short yellow line from its
+// center showing its drift direction and relative speed.
 function drawRocks() {
-  State.rocks.forEach(rock => {
-    const sverts = rock.verts.map(v => w2s(v.x, v.y));
+  // Get the snapshot for this playback step (if available)
+  const snapshot = (UI.playing && UI.pbRockSnapshots.length > 0)
+    ? UI.pbRockSnapshots[Math.min(UI.pbStep, UI.pbRockSnapshots.length - 1)]
+    : null;
+
+  State.rocks.forEach((rock, idx) => {
+    // During playback, override position from snapshot
+    let rx = rock.x, ry = rock.y;
+    let rvx = rock.vx || 0, rvy = rock.vy || 0;
+    if (snapshot && snapshot[idx]) {
+      rx  = snapshot[idx].x;
+      ry  = snapshot[idx].y;
+      rvx = snapshot[idx].vx;
+      rvy = snapshot[idx].vy;
+    }
+
+    // Compute world verts from local offsets + current position
+    // (during playback the position differs from rock.x/rock.y)
+    const worldVerts = rock.localVerts
+      ? rock.localVerts.map(lv => ({ x: rx + lv.x, y: ry + lv.y }))
+      : rock.verts;
+
+    // Project to screen and draw polygon
+    const sverts = worldVerts.map(v => w2s(v.x, v.y));
     mctx.beginPath();
     sverts.forEach((v,i) => i===0 ? mctx.moveTo(v.x,v.y) : mctx.lineTo(v.x,v.y));
     mctx.closePath();
     mctx.fillStyle = '#111a0a'; mctx.fill();
     mctx.strokeStyle = '#2a4a1a'; mctx.lineWidth = 1.5; mctx.stroke();
+
+    // Velocity arrow — yellow line from rock center showing drift.
+    // Length is proportional to speed, scaled by 0.3s of travel so
+    // the arrow shows roughly where the rock will be in 0.3 seconds.
+    const speed = Math.hypot(rvx, rvy);
+    if (speed > 0.01) {
+      const center = w2s(rx, ry);
+      const tip    = w2s(rx + rvx * 0.3, ry + rvy * 0.3);
+      const arrowAngle = Math.atan2(-(tip.y - center.y), tip.x - center.x);
+      const ah = 4; // arrowhead size
+
+      mctx.strokeStyle = '#aaaa2266';
+      mctx.lineWidth = 1;
+      mctx.beginPath();
+      mctx.moveTo(center.x, center.y);
+      mctx.lineTo(tip.x, tip.y);
+      mctx.stroke();
+
+      // Arrowhead
+      mctx.fillStyle = '#aaaa2266';
+      mctx.beginPath();
+      mctx.moveTo(tip.x, tip.y);
+      mctx.lineTo(tip.x - ah*Math.cos(arrowAngle-0.45), tip.y + ah*Math.sin(arrowAngle-0.45));
+      mctx.lineTo(tip.x - ah*Math.cos(arrowAngle+0.45), tip.y + ah*Math.sin(arrowAngle+0.45));
+      mctx.closePath();
+      mctx.fill();
+    }
   });
 }
 
@@ -2235,26 +2589,45 @@ function drawPredictionFromResult(result) {
 // ═══════════════════════════════════════════════════════════
 //  REACHABILITY ENVELOPE
 //
-//  Shows every position the ship could reach by end of turn
-//  as a filled polygon on the tactical display.
+//  Shows every position the ship could reach at each tenth of
+//  a second through the turn, drawn as concentric hulls that
+//  expand outward like sonar waves.
 //
 //  Method: brute-force sampling. We generate ~60 representative
-//  command profiles (combinations of thrust, rotation, and
-//  timing splits), run simulate() for each one, collect the
-//  final positions, compute the convex hull, and draw it.
+//  command profiles, run simulate() for each one, then sample
+//  every trail at 10 time slices (T+10, T+20, ... T+100).
+//  At each slice the positions form a convex hull — the boundary
+//  of all reachable positions at that moment.
 //
-//  This works because simulate() is fast (~0.1ms per call)
-//  and the convex hull of N points is O(N log N). The result
-//  is exact — no approximation or calculus needed.
+//  The envelope is computed ONCE at turn start and cached until
+//  the ship's state changes. It does NOT depend on queued commands
+//  — it shows raw capability, not the current plan. This means
+//  ~60 simulate() calls per turn start, not per command edit.
 //
-//  The envelope is cached and only recomputed when the ship's
-//  state changes (same dirty-flag pattern as prediction).
+//  For fire control, the time slices are the key feature: "where
+//  could the enemy be when my round arrives at time T?" is
+//  answered by the hull at that specific time slice.
 // ═══════════════════════════════════════════════════════════
 
 // Cache for the reachability envelope.
-// Stores { hull: [{x,y}...], drift: {x,y} } — both in world space.
-// Recomputed when predictionDirty is set (same trigger as prediction).
+//
+//  Stores an array of time-sliced hulls, one per sample point.
+//  Each entry: { step, hull: [{x,y}...] }
+//
+//  Also stores a drift trail — the positions at each sample point
+//  with zero thrust — so we can draw the drift path through the
+//  concentric envelopes.
+//
+//  Computed once at turn start and cached until ship state changes.
+//  Command edits do NOT invalidate this — the envelope shows
+//  "everywhere you could possibly be," not "where your current
+//  plan takes you" (that's what the prediction line is for).
+//
 let reachCache = null;
+
+// Number of time slices for the envelope. 10 = one hull per 0.1s.
+const REACH_SLICES = 10;
+const REACH_STEP_INTERVAL = CONFIG.STEPS / REACH_SLICES; // 10 steps per slice
 
 // ── Generate command profiles ────────────────────────────────
 //
@@ -2419,91 +2792,151 @@ function convexHull(points) {
 
 // ── Compute the reachability envelope ────────────────────────
 //
-//  Runs simulate() for each profile, collects final positions,
-//  and computes the convex hull. The result is an array of
-//  world-space points forming the envelope polygon.
+//  Runs simulate() for each profile, then samples every trail at
+//  10 time slices (T+10, T+20, ... T+100). At each slice, the
+//  positions from all profiles are collected and their convex hull
+//  is computed — producing 10 concentric envelopes that show how
+//  the reachable region expands over the turn.
+//
+//  The drift trail (profile 0 = no commands) is extracted separately
+//  so it can be drawn as a path through the center of the envelopes.
+//
+//  Returns { slices: [{step, hull}...], driftTrail: [{x,y}...] }
 //
 function computeReachability() {
   const profiles = generateReachProfiles();
   const params   = buildSimParams();
-  const endpoints = [];
 
-  // The first profile (index 0) is always the drift case (no commands).
-  // We'll pull its final position out for the drift marker.
-  let driftPos = null;
-
-  for (let i = 0; i < profiles.length; i++) {
+  // Run all profiles and store the full trails
+  const allTrails = [];
+  for (const cmds of profiles) {
     const result = simulate(
       State.ship.pos, State.ship.vel,
       State.ship.angle, State.ship.angVel,
-      profiles[i], State.nextCheckIdx, State.rocks, [],
+      cmds, State.nextCheckIdx, State.rocks, [],
       params
     );
-    const fp = { x: result.finalPos.x, y: result.finalPos.y };
-    endpoints.push(fp);
-    if (i === 0) driftPos = fp;
+    allTrails.push(result.trail);
   }
 
-  return { hull: convexHull(endpoints), drift: driftPos };
+  // Extract drift trail (profile 0) at each slice point
+  const driftTrail = [];
+  for (let sl = 1; sl <= REACH_SLICES; sl++) {
+    const stepIdx = sl * REACH_STEP_INTERVAL;
+    const dt = allTrails[0];
+    if (dt && dt[stepIdx]) {
+      driftTrail.push({ x: dt[stepIdx].x, y: dt[stepIdx].y });
+    }
+  }
+
+  // Build a convex hull at each time slice from all profiles
+  const slices = [];
+  for (let sl = 1; sl <= REACH_SLICES; sl++) {
+    const stepIdx = sl * REACH_STEP_INTERVAL;
+    const points = [];
+    for (const trail of allTrails) {
+      // Use the last point if the trail ended early (collision)
+      const idx = Math.min(stepIdx, trail.length - 1);
+      points.push({ x: trail[idx].x, y: trail[idx].y });
+    }
+    slices.push({
+      step: stepIdx,
+      hull: convexHull(points),
+    });
+  }
+
+  return { slices, driftTrail };
 }
 
 // ── Draw the reachability envelope ───────────────────────────
 //
-//  Draws the cached hull as a translucent filled polygon with
-//  a dashed border. The fill uses the player's colour at low
-//  opacity so it doesn't obscure the tactical display.
+//  Draws concentric time-sliced hulls, each progressively larger
+//  and more transparent. The innermost hull (T+10) is brightest,
+//  the outermost (T+100) is faintest. The effect is concentric
+//  rings expanding outward like sonar waves, showing how the
+//  reachable region grows over time.
 //
-//  Also marks the drift point (zero-thrust endpoint) with a
-//  small × so the player can see where they'll end up if they
-//  do nothing.
+//  A small × marks each point on the drift trail (zero-thrust
+//  path) so the player can see where momentum alone takes them.
 //
-function drawReachability() {
-  if (UI.predictionDirty || !reachCache) {
-    reachCache = computeReachability();
-  }
-  drawReachabilityFromCache();
-}
 
 function drawReachabilityFromCache() {
-  if (!reachCache || !reachCache.hull || reachCache.hull.length < 3) return;
+  if (!reachCache || !reachCache.slices || reachCache.slices.length === 0) return;
 
-  // Project hull points to screen space
-  const screenPts = reachCache.hull.map(p => w2s(p.x, p.y));
+  const slices = reachCache.slices;
 
-  // Filled polygon — player colour at low opacity
-  mctx.beginPath();
-  screenPts.forEach((p, i) => i === 0 ? mctx.moveTo(p.x, p.y) : mctx.lineTo(p.x, p.y));
-  mctx.closePath();
+  // Draw from outermost to innermost so inner hulls layer on top
+  for (let i = slices.length - 1; i >= 0; i--) {
+    const slice = slices[i];
+    if (!slice.hull || slice.hull.length < 3) continue;
 
-  // Parse player colour and apply as fill with transparency
-  mctx.fillStyle = Pilot.colour + '12';    // ~7% opacity
-  mctx.fill();
+    const screenPts = slice.hull.map(p => w2s(p.x, p.y));
 
-  // Dashed border
-  mctx.strokeStyle = Pilot.colour + '44';  // ~27% opacity
-  mctx.lineWidth = 1;
-  mctx.setLineDash([4, 4]);
-  mctx.stroke();
-  mctx.setLineDash([]);
+    // Opacity fades outward: innermost ~20%, outermost ~5%
+    const t = (i + 1) / slices.length;   // 0.1 to 1.0
+    const fillAlpha  = Math.round(5 + (1 - t) * 15);  // 5–20 in hex terms
+    const strokeAlpha = Math.round(20 + (1 - t) * 40); // 20–60
 
-  // Drift point marker — shows where the ship ends up with no thrust.
-  // Cached alongside the hull so we don't re-simulate every frame.
-  if (reachCache.drift) {
-    const ds = w2s(reachCache.drift.x, reachCache.drift.y);
+    // Hex opacity strings (00–ff)
+    const fillHex   = fillAlpha.toString(16).padStart(2, '0');
+    const strokeHex = strokeAlpha.toString(16).padStart(2, '0');
 
-    // Small × marker
-    const sz = 4;
-    mctx.strokeStyle = Pilot.colour + '88';
-    mctx.lineWidth = 1.5;
+    // Filled polygon
     mctx.beginPath();
-    mctx.moveTo(ds.x - sz, ds.y - sz); mctx.lineTo(ds.x + sz, ds.y + sz);
-    mctx.moveTo(ds.x + sz, ds.y - sz); mctx.lineTo(ds.x - sz, ds.y + sz);
-    mctx.stroke();
+    screenPts.forEach((p, j) => j === 0 ? mctx.moveTo(p.x, p.y) : mctx.lineTo(p.x, p.y));
+    mctx.closePath();
+    mctx.fillStyle = Pilot.colour + fillHex;
+    mctx.fill();
 
-    // Label
-    mctx.fillStyle = Pilot.colour + '66';
-    mctx.font = '8px Courier New';
-    mctx.fillText('DRIFT', ds.x + 8, ds.y + 3);
+    // Dashed border
+    mctx.strokeStyle = Pilot.colour + strokeHex;
+    mctx.lineWidth = 1;
+    mctx.setLineDash([3, 4]);
+    mctx.stroke();
+    mctx.setLineDash([]);
+
+    // Time label on the outermost point of each hull
+    // Find the point farthest from the ship's screen center
+    const sx = mc.width/2 + UI.panOffset.x;
+    const sy = mc.height/2 + UI.panOffset.y;
+    let farthest = screenPts[0], maxDist = 0;
+    for (const p of screenPts) {
+      const d = Math.hypot(p.x - sx, p.y - sy);
+      if (d > maxDist) { maxDist = d; farthest = p; }
+    }
+    // Only label every other slice to avoid clutter (T+20, T+40, ... T+100)
+    if ((i + 1) % 2 === 0 || i === slices.length - 1) {
+      const stepTime = (slice.step / CONFIG.STEPS).toFixed(1);
+      mctx.fillStyle = Pilot.colour + strokeHex;
+      mctx.font = '7px Courier New';
+      mctx.fillText(`T+${slice.step}`, farthest.x + 4, farthest.y - 3);
+    }
+  }
+
+  // Drift trail — small × markers along the zero-thrust path
+  if (reachCache.driftTrail) {
+    for (let i = 0; i < reachCache.driftTrail.length; i++) {
+      const dp = reachCache.driftTrail[i];
+      const ds = w2s(dp.x, dp.y);
+      const sz = 3;
+      const alpha = 0.3 + (i / reachCache.driftTrail.length) * 0.5;
+
+      mctx.strokeStyle = Pilot.colour + Math.round(alpha * 255).toString(16).padStart(2, '0');
+      mctx.lineWidth = 1;
+      mctx.beginPath();
+      mctx.moveTo(ds.x - sz, ds.y - sz); mctx.lineTo(ds.x + sz, ds.y + sz);
+      mctx.moveTo(ds.x + sz, ds.y - sz); mctx.lineTo(ds.x - sz, ds.y + sz);
+      mctx.stroke();
+    }
+
+    // Label the final drift point
+    if (reachCache.driftTrail.length > 0) {
+      const last = reachCache.driftTrail[reachCache.driftTrail.length - 1];
+      const ls = w2s(last.x, last.y);
+      mctx.fillStyle = Pilot.colour + '66';
+      mctx.font = '8px Courier New';
+      mctx.fillText('DRIFT', ls.x + 8, ls.y + 3);
+    }
   }
 }
 
@@ -3109,7 +3542,13 @@ function updateRotDerived() {
 // ── Command panel controls ───────────────────────────────────
 
 // Mark prediction dirty — call whenever commands change
-function markPredictionDirty() { UI.predictionDirty = true; predictionCache = null; reachCache = null; }
+// Mark prediction dirty — call whenever commands change.
+// Does NOT invalidate the reach envelope — that only depends on ship state.
+function markPredictionDirty() { UI.predictionDirty = true; predictionCache = null; }
+
+// Mark reach envelope dirty — call only when ship state changes
+// (turn commit, launch, reset). NOT on command edits.
+function markReachDirty() { UI.reachDirty = true; reachCache = null; }
 
 document.getElementById('mag-slider').addEventListener('input',function(){
   const n=parseFloat(this.value);
@@ -3168,10 +3607,11 @@ function serializeCmd(c) {
 // oppResult   — simulate() result for opponent's ship (null in solo)
 // onComplete  — called when playback finishes
 function playbackTurn(myResult, oppTrails, onComplete) {
-  UI.pbPositions = myResult.trail;
-  UI.oppTrails   = Array.isArray(oppTrails) ? oppTrails : [];
-  UI.pbStep      = 0;
-  UI.playing     = true;
+  UI.pbPositions     = myResult.trail;
+  UI.oppTrails       = Array.isArray(oppTrails) ? oppTrails : [];
+  UI.pbRockSnapshots = myResult.rockSnapshots || [];
+  UI.pbStep          = 0;
+  UI.playing         = true;
 
   if (UI.pbTimer) clearInterval(UI.pbTimer);
   UI.pbTimer = setInterval(() => {
@@ -3185,6 +3625,7 @@ function playbackTurn(myResult, oppTrails, onComplete) {
       clearInterval(UI.pbTimer); UI.pbTimer = null;
       UI.playing = false;
       UI.oppTrails = [];
+      UI.pbRockSnapshots = [];
       onComplete();
     }
   }, CONFIG.PLAYBACK_MS);
@@ -3198,6 +3639,20 @@ function commitTurn(myResult, logEntry) {
   State.ship.angVel = myResult.finalAngVel;
   State.ship.energy = myResult.finalEnergy ?? State.ship.energy;
   State.nextCheckIdx = myResult.finalCheckIdx;
+
+  // Update rock positions/velocities from simulation result.
+  // The simulation deep-copied the rocks and advanced them through
+  // 100 timesteps — now we commit those final positions back to State.
+  if (myResult.finalRocks) {
+    for (let i = 0; i < State.rocks.length && i < myResult.finalRocks.length; i++) {
+      State.rocks[i].x  = myResult.finalRocks[i].x;
+      State.rocks[i].y  = myResult.finalRocks[i].y;
+      State.rocks[i].vx = myResult.finalRocks[i].vx;
+      State.rocks[i].vy = myResult.finalRocks[i].vy;
+      updateRockWorldVerts(State.rocks[i]);
+    }
+  }
+
   State.replayLog.push(logEntry);
   State.lapTurns++;
   State.turnNum++;
@@ -3316,15 +3771,19 @@ function hostWatchCommands(turnNum, myCommands, logEntry) {
       checks[slot] = slotChecks;
     });
 
-    // Write results — all clients read this and play back
+    // Write results — all clients read this and play back.
+    // Rock state is serialized compactly — only position and velocity,
+    // since radius/mass/seed/localVerts never change.
+    const rockState = myResult.finalRocks.map(r => ({ x:r.x, y:r.y, vx:r.vx, vy:r.vy }));
     await set(ref(db, `games/${Lobby.roomId}/turns/${turnNum}/results`), {
-      trails, finals, checks,
+      trails, finals, checks, rockState,
     });
 
     // Host plays back using the results it just wrote
-    logEntry.trail       = myResult.trail;
-    logEntry.checkpoints = myResult.checkpointEvents;
-    logEntry.oppTrails   = otherSlots.map((_, i) => myResult.otherTrails[i] || []);
+    logEntry.trail          = myResult.trail;
+    logEntry.checkpoints    = myResult.checkpointEvents;
+    logEntry.oppTrails      = otherSlots.map((_, i) => myResult.otherTrails[i] || []);
+    logEntry.rockSnapshots  = myResult.rockSnapshots;
 
     applyTurnResult(myResult.trail, otherSlots.map((_, i) => myResult.otherTrails[i] || []),
       myResult, myResult.otherFinal, logEntry);
@@ -3373,9 +3832,28 @@ function clientWatchResults(turnNum, logEntry) {
       finalCheckIdx:     State.nextCheckIdx + hostChecks.length,
     };
 
-    logEntry.trail       = myTrail;
-    logEntry.checkpoints = myResult.checkpointEvents;
-    logEntry.oppTrails   = oppTrails;
+    // Reconstruct finalRocks from host's compact rockState.
+    // Structural data (r, mass, seed, localVerts) comes from State.rocks;
+    // only positions and velocities come from the host.
+    if (data.rockState) {
+      const rs = Object.values(data.rockState);
+      myResult.finalRocks = State.rocks.map((rock, i) => ({
+        ...rock,
+        x:  rs[i]?.x  ?? rock.x,
+        y:  rs[i]?.y  ?? rock.y,
+        vx: rs[i]?.vx ?? rock.vx,
+        vy: rs[i]?.vy ?? rock.vy,
+        verts: rock.localVerts.map(lv => ({
+          x: (rs[i]?.x ?? rock.x) + lv.x,
+          y: (rs[i]?.y ?? rock.y) + lv.y,
+        })),
+      }));
+    }
+
+    logEntry.trail          = myTrail;
+    logEntry.checkpoints    = myResult.checkpointEvents;
+    logEntry.oppTrails      = oppTrails;
+    logEntry.rockSnapshots  = []; // Not synced from host — rocks won't animate during non-host playback
 
     applyTurnResult(myTrail, oppTrails, myResult, oppFinals, logEntry);
   });
@@ -3407,6 +3885,7 @@ function applyTurnResult(myTrail, oppTrails, myResult, oppFinals, logEntry) {
 
     document.getElementById('phase').textContent = 'PLANNING';
     markPredictionDirty();
+    markReachDirty();
     const execBtn = document.getElementById('btn-exec');
 
     if (State.nextCheckIdx >= CHECKPOINT_ORDER.length) {
@@ -3433,6 +3912,10 @@ document.getElementById('btn-exec').addEventListener('click', function() {
     startAngVel: State.ship.angVel,
     startEnergy: State.ship.energy,
     commands:    State.commands.map(c => ({...c})),
+    // Compact rock snapshot — only mutable fields (position + velocity).
+    // Structural properties (r, mass, seed, localVerts) never change
+    // and are still in State.rocks, so replay just patches positions.
+    startRocks:  State.rocks.map(r => ({ x:r.x, y:r.y, vx:r.vx, vy:r.vy })),
   };
   const myCommands = State.commands.slice();
 
@@ -3458,9 +3941,10 @@ document.getElementById('btn-exec').addEventListener('click', function() {
       myCommands, State.nextCheckIdx, State.rocks, [],
       buildSimParams()
     );
-    logEntry.trail       = myResult.trail;
-    logEntry.checkpoints = myResult.checkpointEvents;
-    logEntry.oppTrails   = [];
+    logEntry.trail          = myResult.trail;
+    logEntry.checkpoints    = myResult.checkpointEvents;
+    logEntry.oppTrails      = [];
+    logEntry.rockSnapshots  = myResult.rockSnapshots;
     applyTurnResult(myResult.trail, [], myResult, [], logEntry);
   }
 });
@@ -3501,6 +3985,19 @@ function playReplayTurn() {
   State.ship.angVel =entry.startAngVel;
   State.ship.energy =entry.startEnergy ?? State.ship.energy;
 
+  // Restore rock positions to start of this turn
+  if (entry.startRocks) {
+    entry.startRocks.forEach((snap, i) => {
+      if (State.rocks[i]) {
+        State.rocks[i].x  = snap.x;
+        State.rocks[i].y  = snap.y;
+        State.rocks[i].vx = snap.vx;
+        State.rocks[i].vy = snap.vy;
+        updateRockWorldVerts(State.rocks[i]);
+      }
+    });
+  }
+
   // Restore opponents to their positions at the start of this turn
   // stored in entry.oppStartStates (added during applyTurnResult)
   if (entry.oppStartStates) {
@@ -3514,10 +4011,11 @@ function playReplayTurn() {
     });
   }
 
-  UI.pbPositions = entry.trail;
-  UI.oppTrails   = entry.oppTrails || [];
-  UI.pbStep      = 0;
-  UI.playing     = true;
+  UI.pbPositions     = entry.trail;
+  UI.oppTrails       = entry.oppTrails || [];
+  UI.pbRockSnapshots = entry.rockSnapshots || [];
+  UI.pbStep          = 0;
+  UI.playing         = true;
 
   document.getElementById('replay-turn-disp').textContent=
     `TURN ${entry.turn} / ${State.replayLog.length}`;
@@ -3550,7 +4048,21 @@ function playReplayTurn() {
         State.opponents[i].angVel = ol.angVel || 0;
       });
 
-      UI.pbPositions=[]; UI.oppTrails=[]; UI.pbStep=0; UI.playing=false;
+      UI.pbPositions=[]; UI.oppTrails=[]; UI.pbRockSnapshots=[]; UI.pbStep=0; UI.playing=false;
+
+      // Advance rocks to end-of-turn positions from last snapshot
+      if (entry.rockSnapshots && entry.rockSnapshots.length > 0) {
+        const finalSnap = entry.rockSnapshots[entry.rockSnapshots.length - 1];
+        finalSnap.forEach((snap, i) => {
+          if (State.rocks[i]) {
+            State.rocks[i].x  = snap.x;
+            State.rocks[i].y  = snap.y;
+            State.rocks[i].vx = snap.vx;
+            State.rocks[i].vy = snap.vy;
+            updateRockWorldVerts(State.rocks[i]);
+          }
+        });
+      }
       Replay.turnIdx++;
       setTimeout(playReplayTurn, CONFIG.REPLAY_GAP_MS);
     }
@@ -3559,7 +4071,7 @@ function playReplayTurn() {
 
 function endReplay() {
   UI.playing=false; Replay.active=false;
-  UI.pbPositions=[]; UI.pbStep=0;
+  UI.pbPositions=[]; UI.pbRockSnapshots=[]; UI.pbStep=0;
   document.getElementById('replay-controls').classList.add('hidden');
   showLapComplete();
 }
@@ -3606,6 +4118,8 @@ function resetLap() {
   document.getElementById('phase').textContent='PLANNING';
   document.getElementById('btn-exec').disabled=false;
   document.getElementById('lap-overlay').classList.add('hidden');
+  markPredictionDirty();
+  markReachDirty();
   updateSelPanel(); renderSeq();
   setStatus(`MISSION RESET — NEXT CHECKPOINT: ${BEACONS[CHECKPOINT_ORDER[0]].label}`);
 }
@@ -3698,6 +4212,7 @@ function launchGame(overrideConfig) {
   document.getElementById('btn-exec').disabled=false;
   document.getElementById('pilot-display').textContent = Pilot.name || 'HULL-01';
   markPredictionDirty();
+  markReachDirty();
   updateSelPanel(); renderSeq();
   document.getElementById('menu-overlay').classList.add('hidden');
   const firstCheck = BEACONS[CHECKPOINT_ORDER[0]]?.label || '?';
