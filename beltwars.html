@@ -2234,9 +2234,9 @@ function impartMomentumToRock(rock, shipVel, shipMass, normalX, normalY, restitu
 //  is mutated in place (it's already a deep copy at that point).
 //
 function advanceRocks(rocks, dt, hardWallRadius) {
-  const cellSize    = CONFIG.ROCK_HASH_CELL;
+  const cellSize = CONFIG.ROCK_HASH_CELL;
   const restitution = CONFIG.ROCK_RESTITUTION;
-  const speedFloor  = CONFIG.ROCK_MIN_SPEED_FLOOR;
+  const speedFloor = CONFIG.ROCK_MIN_SPEED_FLOOR;
 
   // 1. Advance positions
   for (const rock of rocks) {
@@ -2244,40 +2244,48 @@ function advanceRocks(rocks, dt, hardWallRadius) {
     rock.y += rock.vy * dt;
   }
 
-  // 2. Build spatial hash and resolve rock-rock collisions
-  const grid = buildSpatialHash(rocks, cellSize);
-  const checked = new Set(); // track checked pairs to avoid duplicates
-
+  // 2. Build spatial hash with integer keys
+  const grid = {};
   for (let i = 0; i < rocks.length; i++) {
-    const nearby = queryNearby(grid, rocks[i], cellSize);
-    for (const j of nearby) {
-      if (j <= i) continue; // skip self and already-checked pairs
-      const pairKey = i * rocks.length + j;
-      if (checked.has(pairKey)) continue;
-      checked.add(pairKey);
-      resolveRockCollision(rocks[i], rocks[j], restitution);
+    const cx = Math.floor(rocks[i].x / cellSize);
+    const cy = Math.floor(rocks[i].y / cellSize);
+    const key = cx + (cy << 16);
+    if (!grid[key]) grid[key] = [];
+    grid[key].push(i);
+  }
+
+  // 3. Resolve collisions (no Set, no string keys)
+  for (let i = 0; i < rocks.length; i++) {
+    const rock = rocks[i];
+    const cx = Math.floor(rock.x / cellSize);
+    const cy = Math.floor(rock.y / cellSize);
+    
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        const key = (cx + dx) + ((cy + dy) << 16);
+        const cell = grid[key];
+        if (!cell) continue;
+        for (const j of cell) {
+          if (j <= i) continue;
+          resolveRockCollision(rocks[i], rocks[j], restitution);
+        }
+      }
     }
   }
 
-  // 3. Wrap at boundary and enforce speed floor
+  // 4. Wrap & speed floor (unchanged)
   for (const rock of rocks) {
     const dist = Math.hypot(rock.x, rock.y);
     if (dist > hardWallRadius + rock.r) {
-      // Wrap to opposite side — teleport across the origin
       rock.x = -rock.x * (hardWallRadius - rock.r) / dist;
       rock.y = -rock.y * (hardWallRadius - rock.r) / dist;
     }
-
-    // Speed floor — if a collision drained too much velocity,
-    // scale it back up to the minimum, preserving direction.
     const speed = Math.hypot(rock.vx, rock.vy);
     if (speed > 0.001 && speed < speedFloor) {
       const scale = speedFloor / speed;
       rock.vx *= scale;
       rock.vy *= scale;
     }
-
-    // 4. Update world vertices from local offsets
     updateRockWorldVerts(rock);
   }
 }
