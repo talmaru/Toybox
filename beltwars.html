@@ -94,12 +94,23 @@ const FIREBASE_CONFIG = {
   #viewport { flex: 1; position: relative; overflow: hidden; min-height: 0; }
   #main-canvas { display: block; width: 100%; height: 100%; }
 
-  /* ── NAV STATUS STRIP ──────────────────────────────────────
-     Horizontal readout bar showing live telemetry             */
-  #nav-strip {
+  /* ── NAV STATUS PANEL ─────────────────────────────────────
+     Framed readout panel with NAV and ENERGY sections         */
+  #nav-panel {
+    display: flex; align-items: stretch;
+    border-top: 1px solid var(--grid);
+    background: #000c00; flex-shrink: 0;
+  }
+  .nav-section {
     display: flex; align-items: center; gap: 10px;
-    padding: 4px 14px; border-top: 1px solid var(--grid);
-    background: #000c00; flex-shrink: 0; flex-wrap: wrap;
+    padding: 5px 14px; flex-wrap: wrap;
+  }
+  .nav-section + .nav-section {
+    border-left: 1px solid var(--grid);
+  }
+  .nav-section-header {
+    font-size: 9px; letter-spacing: 3px; color: var(--text-dim);
+    white-space: nowrap; margin-right: 4px;
   }
   .ns-item { font-size: 11px; color: var(--text-dim); white-space: nowrap; }
   .ns-item span { color: var(--bright); }
@@ -532,6 +543,22 @@ const FIREBASE_CONFIG = {
         <input type="range" id="mn-gap" min="0.2" max="5" step="0.1" value="1">
         <span class="menu-val" id="mv-gap">1.0 km</span>
       </div>
+      <div class="m-section-title" style="margin-top:14px;">ROCK DYNAMICS</div>
+      <div class="menu-row">
+        <label>MIN SPEED (km/s)</label>
+        <input type="range" id="mn-rminv" min="0" max="3" step="0.1" value="0.3">
+        <span class="menu-val" id="mv-rminv">0.3</span>
+      </div>
+      <div class="menu-row">
+        <label>MAX SPEED (km/s)</label>
+        <input type="range" id="mn-rmaxv" min="0" max="5" step="0.1" value="1.5">
+        <span class="menu-val" id="mv-rmaxv">1.5</span>
+      </div>
+      <div class="menu-row">
+        <label>FLOW</label>
+        <input type="range" id="mn-flow" min="0" max="1" step="0.05" value="1">
+        <span class="menu-val" id="mv-flow">TURBULENT</span>
+      </div>
       <div class="m-section-title" style="margin-top:14px;">BEACON ZONES</div>
       <div class="menu-row">
         <label>EXCLUSION ZONE (km)</label>
@@ -567,32 +594,37 @@ const FIREBASE_CONFIG = {
         <div class="ov-item" data-key="predict"> <span class="ov-check on">✓</span> PREDICTION</div>
         <div class="ov-item" data-key="heading"> <span class="ov-check on">✓</span> HEADING TICKS</div>
         <div class="ov-item" data-key="velArrow"><span class="ov-check on">✓</span> VELOCITY ARROW</div>
-        <div class="ov-item" data-key="reach">   <span class="ov-check">✓</span> REACH ENVELOPE</div>
+        <div class="ov-item" data-key="reach">   <span class="ov-check on">✓</span> REACH ENVELOPE</div>
         <div class="ov-item" data-key="labels">  <span class="ov-check on">✓</span> LABELS</div>
       </div>
     </div>
   </div>
 </div>
 
-<!-- ── NAV STATUS STRIP ──────────────────────────────────── -->
-<div id="nav-strip">
-  <span class="ns-item">POS X <span id="r-px">0.00</span> km</span>
-  <span class="ns-sep">|</span>
-  <span class="ns-item">POS Y <span id="r-py">0.00</span> km</span>
-  <span class="ns-sep">|</span>
-  <span class="ns-item">SPEED <span id="r-sp">0.000</span> km/s</span>
-  <span class="ns-sep">|</span>
-  <span class="ns-item">HEADING <span id="r-hd">0.0°</span></span>
-  <span class="ns-sep">|</span>
-  <span class="ns-item">ROT RATE <span id="r-av">—</span> °/s</span>
-  <span class="ns-sep">|</span>
-  <span class="ns-item">ACTIVE BEACON <span id="r-db">---</span> km</span>
-  <span class="ns-sep">|</span>
-  <span class="ns-item">ENERGY <span id="r-energy" style="color:var(--accent)">—</span></span>
-  <span class="ns-sep">|</span>
-  <span class="ns-item">PLAN COST <span id="r-energy-cost" style="color:var(--text-dim)">—</span></span>
-  <span class="ns-sep">|</span>
-  <span class="ns-item">PROJECTED <span id="r-energy-proj" style="color:var(--accent)">—</span></span>
+<!-- ── NAV STATUS PANEL ──────────────────────────────────── -->
+<div id="nav-panel">
+  <!-- NAV section — position, velocity, heading -->
+  <div class="nav-section">
+    <span class="nav-section-header">NAV</span>
+    <span class="ns-item">POS <span id="r-px">0.00</span>, <span id="r-py">0.00</span> km</span>
+    <span class="ns-sep">|</span>
+    <span class="ns-item">SPD <span id="r-sp">0.000</span> km/s</span>
+    <span class="ns-sep">|</span>
+    <span class="ns-item">HDG <span id="r-hd">0.0°</span></span>
+    <span class="ns-sep">|</span>
+    <span class="ns-item">ROT <span id="r-av">—</span> °/s</span>
+    <span class="ns-sep">|</span>
+    <span class="ns-item">BEACON <span id="r-db">---</span></span>
+  </div>
+  <!-- ENERGY section — battery, plan cost, projected -->
+  <div class="nav-section">
+    <span class="nav-section-header">ENERGY</span>
+    <span class="ns-item">BAT <span id="r-energy" style="color:var(--accent)">—</span></span>
+    <span class="ns-sep">|</span>
+    <span class="ns-item">COST <span id="r-energy-cost" style="color:var(--text-dim)">—</span></span>
+    <span class="ns-sep">|</span>
+    <span class="ns-item">PROJ <span id="r-energy-proj" style="color:var(--accent)">—</span></span>
+  </div>
 </div>
 
 <!-- ── COMMAND PANEL ─────────────────────────────────────── -->
@@ -600,7 +632,7 @@ const FIREBASE_CONFIG = {
   <!-- Shown when nothing is selected -->
   <div id="sel-none-strip">
     NO COMMAND SELECTED
-    <span class="hint">DRAG ON TRACK TO CREATE · DRAG TO MOVE · DRAG EDGE TO RESIZE · DEL TO REMOVE · DBL-CLICK TO EDIT</span>
+    <span class="hint">DRAG ON TRACK TO CREATE · DRAG TO MOVE · DRAG EDGE TO RESIZE · DEL TO REMOVE · DBL-CLICK TO DELETE</span>
   </div>
 
   <!-- Shown when a bar is selected -->
@@ -865,7 +897,9 @@ const CONFIG = {
   //  and with ships (polygon). When a rock exits the arena boundary
   //  it wraps to the opposite side.
   //
-  //  ROCK_MIN_SPEED / MAX_SPEED: range for initial velocity magnitude.
+  //  ROCK_MIN_SPEED / MAX_SPEED: fallback defaults for initial velocity.
+  //    Normally overridden by courseConfig.rockMinSpeed/rockMaxSpeed
+  //    which are set per-course from the menu.
   //  ROCK_DENSITY: kg/m³ — mass = density × (4/3)π × r³. Rocky
   //    asteroid density (~2500) gives cubic mass scaling so big rocks
   //    are dramatically heavier than small ones.
@@ -1168,6 +1202,14 @@ const State = {
     waypoints:   3,
     radius:      80,
     randomOrder: false,
+    // Rock dynamics — configurable per course via the menu.
+    // minSpeed/maxSpeed: initial velocity range in km/s.
+    // flow: 0.0 = fully laminar (all rocks share one direction),
+    //       1.0 = fully turbulent (random directions). Values
+    //       in between produce a prevailing current with jitter.
+    rockMinSpeed: 0.3,
+    rockMaxSpeed: 1.5,
+    rockFlow:     1.0,
   },
 
   // Lap tracking
@@ -1240,7 +1282,7 @@ const UI = {
   overlays: {
     grid: true, rings: false, beacons: true, rocks: true,
     bounds: true, predict: true, heading: true, velArrow: true,
-    reach: false, labels: true,
+    reach: true, labels: true,
   },
 
   // Running command ID counter — gives each command a unique ID.
@@ -1986,6 +2028,20 @@ function generateRocks(cfg) {
   const R        = cfg.radius || 80;
   const hardWall = R * CONFIG.HARD_WALL_MULT;
 
+  // Velocity parameters — read from courseConfig with CONFIG fallbacks.
+  const minSpeed = cfg.rockMinSpeed ?? CONFIG.ROCK_MIN_SPEED;
+  const maxSpeed = cfg.rockMaxSpeed ?? CONFIG.ROCK_MAX_SPEED;
+
+  // Flow parameter — controls how coherent the velocity field is.
+  //   0.0 = laminar: all rocks share one base direction (a "current")
+  //   1.0 = turbulent: each rock gets a fully random direction
+  //   In between: base direction ± (flow × π) of random spread
+  //
+  // The base flow direction is seeded so both multiplayer clients
+  // generate identical rock fields.
+  const flow      = cfg.rockFlow ?? 1.0;
+  const baseAngle = rng() * Math.PI * 2;   // prevailing current direction
+
   for (let attempt = 0; attempt < maxTries && placed.length < cfg.count; attempt++) {
     // Place rocks within the hard boundary circle using rejection sampling
     const x = (rng() * 2 - 1) * hardWall;
@@ -2014,11 +2070,20 @@ function generateRocks(cfg) {
     }
 
     if (valid) {
-      // Velocity — random direction, magnitude in [MIN_SPEED, MAX_SPEED]
-      const speed = CONFIG.ROCK_MIN_SPEED + rng() * (CONFIG.ROCK_MAX_SPEED - CONFIG.ROCK_MIN_SPEED);
-      const angle = rng() * Math.PI * 2;
-      const vx    = Math.cos(angle) * speed;
-      const vy    = Math.sin(angle) * speed;
+      // Velocity magnitude — uniform random in [minSpeed, maxSpeed]
+      const speed = minSpeed + rng() * (maxSpeed - minSpeed);
+
+      // Velocity direction — interpolated between laminar and turbulent.
+      // At flow=0, angle = baseAngle exactly (all rocks move together).
+      // At flow=1, angle = fully random (current behavior).
+      // In between, the rock's angle deviates from the base by up to
+      // flow × π radians in either direction.
+      const randomAngle = rng() * Math.PI * 2;
+      const deviation   = (rng() * 2 - 1) * flow * Math.PI;
+      const angle       = flow >= 0.99 ? randomAngle : baseAngle + deviation;
+
+      const vx = Math.cos(angle) * speed;
+      const vy = Math.sin(angle) * speed;
 
       // Mass — density × spherical volume. Cubic scaling means a rock
       // with 2× the radius has 8× the mass. This makes big rocks
@@ -3118,7 +3183,7 @@ function updateReadouts() {
   const activeB   = BEACONS[activeIdx];
   if (activeB) {
     const activeDist = Math.hypot(dp.x - activeB.x, dp.y - activeB.y);
-    document.getElementById('r-db').textContent = `${activeDist.toFixed(2)} (${activeB.label})`;
+    document.getElementById('r-db').textContent = `${activeDist.toFixed(1)}km ${activeB.label}`;
   } else {
     document.getElementById('r-db').textContent = '--- (NONE)';
   }
@@ -3353,12 +3418,17 @@ seqC.addEventListener('mouseleave', () => {
   if (!UI.drag.active) document.getElementById('seq-cur').textContent='T+—';
 });
 
-// Double-click a bar to open the numeric edit modal
+// Double-click a bar to delete it (faster than selecting + pressing Delete)
 seqC.addEventListener('dblclick', e => {
   if (UI.playing) return;
   const r=seqC.getBoundingClientRect(), x=e.clientX-r.left, y=e.clientY-r.top;
   const h=hitTest(x,y);
-  if (h&&h.cmd) openModal(h.cmd);
+  if (h&&h.cmd) {
+    State.commands = State.commands.filter(c => c !== h.cmd);
+    if (UI.selCmd === h.cmd) UI.selCmd = null;
+    updateSelPanel(); markPredictionDirty(); renderSeq();
+    setStatus('COMMAND REMOVED');
+  }
 });
 
 // Delete key removes selected command
@@ -4159,6 +4229,22 @@ menuSlider('mn-maxr', 'mv-maxr',' km',1);
 menuSlider('mn-gap',  'mv-gap', ' km',1);
 menuSlider('mn-bclear','mv-bclear',' km',0);
 menuSlider('mn-gate',  'mv-gate',  ' km',0);
+menuSlider('mn-rminv','mv-rminv','',1);
+menuSlider('mn-rmaxv','mv-rmaxv','',1);
+
+// Flow slider gets a custom label: 0 = LAMINAR, 1 = TURBULENT, in-between = percentage
+(function() {
+  const el = document.getElementById('mn-flow');
+  const vl = document.getElementById('mv-flow');
+  function updateLabel() {
+    const v = parseFloat(el.value);
+    if (v <= 0.01)     vl.textContent = 'LAMINAR';
+    else if (v >= 0.99) vl.textContent = 'TURBULENT';
+    else                vl.textContent = Math.round(v * 100) + '%';
+  }
+  updateLabel();
+  el.addEventListener('input', updateLabel);
+})();
 
 document.getElementById('btn-rand-seed').addEventListener('click',()=>{
   document.getElementById('mn-seed').value=Math.floor(Math.random()*999999)+1;
@@ -4177,6 +4263,9 @@ function launchGame(overrideConfig) {
     waypoints:   parseInt(document.getElementById('mn-waypoints').value) || 3,
     radius:      parseInt(document.getElementById('mn-radius').value)    || 80,
     randomOrder: document.getElementById('btn-order-rnd').classList.contains('active'),
+    rockMinSpeed:parseFloat(document.getElementById('mn-rminv').value) ?? 0.3,
+    rockMaxSpeed:parseFloat(document.getElementById('mn-rmaxv').value) ?? 1.5,
+    rockFlow:    parseFloat(document.getElementById('mn-flow').value)  ?? 1.0,
   };
 
   // Apply the player's chosen ship class — sets SHIP_MASS, SHIP_MOI, SHIP_RADIUS
@@ -4751,6 +4840,9 @@ async function multiLaunch() {
     waypoints:   parseInt(document.getElementById('mn-waypoints').value) || 3,
     radius:      parseInt(document.getElementById('mn-radius').value)    || 80,
     randomOrder: document.getElementById('btn-order-rnd').classList.contains('active'),
+    rockMinSpeed:parseFloat(document.getElementById('mn-rminv').value) ?? 0.3,
+    rockMaxSpeed:parseFloat(document.getElementById('mn-rmaxv').value) ?? 1.5,
+    rockFlow:    parseFloat(document.getElementById('mn-flow').value)  ?? 1.0,
   };
 
   // Read all opponent data from Firebase before launching
