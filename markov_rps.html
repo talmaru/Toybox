@@ -1,0 +1,747 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Markov RPS - Tal's Toybox</title>
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700;900&family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --terminal-bg: #0a0e27;
+            --terminal-green: #00ff41;
+            --terminal-amber: #ffb000;
+            --terminal-cyan: #00d9ff;
+            --terminal-red: #ff0055;
+            --glow-green: rgba(0, 255, 65, 0.5);
+            --glow-amber: rgba(255, 176, 0, 0.5);
+            --surface: #141b3d;
+            --surface-light: #1e2750;
+            --text-dim: #8b9dc3;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'IBM Plex Mono', monospace;
+            background: var(--terminal-bg);
+            color: var(--terminal-green);
+            min-height: 100vh;
+            padding: 2rem;
+            background-image: 
+                repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0, 255, 65, 0.03) 2px, rgba(0, 255, 65, 0.03) 4px);
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        header {
+            text-align: center;
+            margin-bottom: 3rem;
+            animation: fadeInDown 0.8s ease-out;
+        }
+
+        h1 {
+            font-family: 'Orbitron', sans-serif;
+            font-size: 3rem;
+            font-weight: 900;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            color: var(--terminal-green);
+            text-shadow: 0 0 20px var(--glow-green), 0 0 40px var(--glow-green);
+            margin-bottom: 0.5rem;
+        }
+
+        .subtitle {
+            font-size: 0.9rem;
+            color: var(--terminal-amber);
+            letter-spacing: 0.3em;
+            text-transform: uppercase;
+            text-shadow: 0 0 10px var(--glow-amber);
+        }
+
+        .game-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 2rem;
+            margin-bottom: 2rem;
+        }
+
+        .panel {
+            background: var(--surface);
+            border: 2px solid var(--terminal-green);
+            border-radius: 4px;
+            padding: 1.5rem;
+            position: relative;
+            box-shadow: 0 0 20px rgba(0, 255, 65, 0.1);
+        }
+
+        .panel-title {
+            font-family: 'Orbitron', sans-serif;
+            font-size: 0.9rem;
+            letter-spacing: 0.2em;
+            text-transform: uppercase;
+            color: var(--terminal-amber);
+            margin-bottom: 1rem;
+            border-bottom: 1px solid var(--terminal-green);
+            padding-bottom: 0.5rem;
+        }
+
+        .score-display {
+            display: flex;
+            justify-content: space-around;
+            align-items: center;
+            margin: 1.5rem 0;
+        }
+
+        .score-item {
+            text-align: center;
+        }
+
+        .score-label {
+            font-size: 0.75rem;
+            color: var(--text-dim);
+            margin-bottom: 0.5rem;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+        }
+
+        .score-value {
+            font-family: 'Orbitron', sans-serif;
+            font-size: 3rem;
+            font-weight: 900;
+            line-height: 1;
+        }
+
+        .score-item.player .score-value {
+            color: var(--terminal-cyan);
+            text-shadow: 0 0 15px rgba(0, 217, 255, 0.5);
+        }
+
+        .score-item.ai .score-value {
+            color: var(--terminal-red);
+            text-shadow: 0 0 15px rgba(255, 0, 85, 0.5);
+        }
+
+        .score-item.tie .score-value {
+            color: var(--terminal-amber);
+            text-shadow: 0 0 15px var(--glow-amber);
+        }
+
+        .controls {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 1rem;
+            margin-top: 1.5rem;
+        }
+
+        .move-btn {
+            font-family: 'Orbitron', sans-serif;
+            background: var(--surface-light);
+            border: 2px solid var(--terminal-green);
+            color: var(--terminal-green);
+            padding: 2rem 1rem;
+            font-size: 1.2rem;
+            font-weight: 700;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            position: relative;
+            overflow: hidden;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+        }
+
+        .move-btn:hover {
+            background: var(--terminal-green);
+            color: var(--terminal-bg);
+            box-shadow: 0 0 30px var(--glow-green);
+            transform: translateY(-2px);
+        }
+
+        .move-btn:active {
+            transform: translateY(0);
+        }
+
+        .move-btn::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -100%;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(0, 255, 65, 0.3), transparent);
+            transition: left 0.5s ease;
+        }
+
+        .move-btn:hover::before {
+            left: 100%;
+        }
+
+        .result-display {
+            text-align: center;
+            padding: 1.5rem;
+            margin-top: 1rem;
+            background: var(--surface-light);
+            border-radius: 4px;
+            min-height: 100px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            border: 1px solid var(--terminal-green);
+        }
+
+        .result-text {
+            font-family: 'Orbitron', sans-serif;
+            font-size: 1.5rem;
+            font-weight: 700;
+            margin-bottom: 0.5rem;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+        }
+
+        .result-detail {
+            font-size: 0.9rem;
+            color: var(--text-dim);
+        }
+
+        .result-text.win {
+            color: var(--terminal-cyan);
+            text-shadow: 0 0 15px rgba(0, 217, 255, 0.5);
+        }
+
+        .result-text.lose {
+            color: var(--terminal-red);
+            text-shadow: 0 0 15px rgba(255, 0, 85, 0.5);
+        }
+
+        .result-text.tie {
+            color: var(--terminal-amber);
+            text-shadow: 0 0 15px var(--glow-amber);
+        }
+
+        .markov-display {
+            grid-column: 1 / -1;
+        }
+
+        .chain-viz {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-top: 1rem;
+        }
+
+        .chain-state {
+            background: var(--surface-light);
+            padding: 1rem;
+            border-radius: 4px;
+            border: 1px solid var(--terminal-green);
+        }
+
+        .state-label {
+            font-size: 0.75rem;
+            color: var(--terminal-amber);
+            margin-bottom: 0.5rem;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+        }
+
+        .state-probs {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+
+        .prob-bar {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .prob-label {
+            font-size: 0.8rem;
+            width: 30px;
+            color: var(--text-dim);
+        }
+
+        .prob-track {
+            flex: 1;
+            height: 8px;
+            background: rgba(0, 255, 65, 0.1);
+            border-radius: 4px;
+            overflow: hidden;
+            border: 1px solid rgba(0, 255, 65, 0.3);
+        }
+
+        .prob-fill {
+            height: 100%;
+            background: var(--terminal-green);
+            transition: width 0.3s ease;
+            box-shadow: 0 0 10px var(--glow-green);
+        }
+
+        .prob-value {
+            font-size: 0.75rem;
+            width: 40px;
+            text-align: right;
+            color: var(--terminal-green);
+        }
+
+        .history {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+            margin-top: 1rem;
+        }
+
+        .history-item {
+            background: var(--surface-light);
+            padding: 0.5rem 0.75rem;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            border: 1px solid var(--terminal-green);
+            display: flex;
+            gap: 0.5rem;
+            align-items: center;
+        }
+
+        .history-player {
+            color: var(--terminal-cyan);
+        }
+
+        .history-ai {
+            color: var(--terminal-red);
+        }
+
+        .history-separator {
+            color: var(--text-dim);
+        }
+
+        .ai-thinking {
+            text-align: center;
+            color: var(--terminal-amber);
+            font-size: 0.9rem;
+            margin-top: 1rem;
+            animation: pulse 1.5s ease-in-out infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 0.5; }
+            50% { opacity: 1; }
+        }
+
+        @keyframes fadeInDown {
+            from {
+                opacity: 0;
+                transform: translateY(-20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .reset-btn {
+            font-family: 'IBM Plex Mono', monospace;
+            background: transparent;
+            border: 1px solid var(--terminal-red);
+            color: var(--terminal-red);
+            padding: 0.75rem 1.5rem;
+            font-size: 0.9rem;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            margin-top: 1rem;
+            width: 100%;
+        }
+
+        .reset-btn:hover {
+            background: var(--terminal-red);
+            color: var(--terminal-bg);
+            box-shadow: 0 0 20px rgba(255, 0, 85, 0.5);
+        }
+
+        .info-text {
+            font-size: 0.85rem;
+            color: var(--text-dim);
+            line-height: 1.6;
+            margin-top: 1rem;
+        }
+
+        @media (max-width: 768px) {
+            h1 {
+                font-size: 2rem;
+            }
+
+            .game-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .controls {
+                grid-template-columns: 1fr;
+            }
+
+            .score-value {
+                font-size: 2rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Markov RPS</h1>
+            <div class="subtitle">Predictive Game Theory Engine</div>
+        </header>
+
+        <div class="game-grid">
+            <div class="panel">
+                <div class="panel-title">Game Status</div>
+                <div class="score-display">
+                    <div class="score-item player">
+                        <div class="score-label">You</div>
+                        <div class="score-value" id="player-score">0</div>
+                    </div>
+                    <div class="score-item tie">
+                        <div class="score-label">Ties</div>
+                        <div class="score-value" id="tie-score">0</div>
+                    </div>
+                    <div class="score-item ai">
+                        <div class="score-label">AI</div>
+                        <div class="score-value" id="ai-score">0</div>
+                    </div>
+                </div>
+                <div class="result-display" id="result-display">
+                    <div class="result-text">Ready</div>
+                    <div class="result-detail">Make your move to begin</div>
+                </div>
+                <button class="reset-btn" onclick="resetGame()">Reset Game</button>
+            </div>
+
+            <div class="panel">
+                <div class="panel-title">Player Controls</div>
+                <div class="controls">
+                    <button class="move-btn" onclick="playerMove('R')">
+                        ✊<br>Rock
+                    </button>
+                    <button class="move-btn" onclick="playerMove('P')">
+                        ✋<br>Paper
+                    </button>
+                    <button class="move-btn" onclick="playerMove('S')">
+                        ✌️<br>Scissors
+                    </button>
+                </div>
+                <div class="info-text">
+                    The AI learns your patterns using a 2nd-order Markov chain. 
+                    It tracks sequences of your moves to predict what you'll play next.
+                </div>
+            </div>
+
+            <div class="panel markov-display">
+                <div class="panel-title">Markov Chain State (Last 2 Moves)</div>
+                <div id="ai-thinking-text" class="ai-thinking" style="display: none;">
+                    Analyzing pattern matrix...
+                </div>
+                <div class="chain-viz" id="chain-viz">
+                    <!-- Populated by JavaScript -->
+                </div>
+            </div>
+
+            <div class="panel markov-display">
+                <div class="panel-title">Move History</div>
+                <div class="history" id="history">
+                    <div style="color: var(--text-dim);">No moves yet...</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Game state
+        let playerScore = 0;
+        let aiScore = 0;
+        let tieScore = 0;
+        let moveHistory = [];
+        let markovChain = {};
+
+        // Initialize Markov chain with all possible 2-move sequences
+        function initMarkovChain() {
+            const moves = ['R', 'P', 'S'];
+            markovChain = {};
+            
+            for (let m1 of moves) {
+                for (let m2 of moves) {
+                    const state = m1 + m2;
+                    markovChain[state] = { R: 0, P: 0, S: 0 };
+                }
+            }
+        }
+
+        // Update Markov chain based on move sequence
+        function updateMarkovChain(history) {
+            if (history.length < 3) return;
+            
+            // Look at the last 3 moves to update the chain
+            const state = history[history.length - 3] + history[history.length - 2];
+            const nextMove = history[history.length - 1];
+            
+            if (markovChain[state]) {
+                markovChain[state][nextMove]++;
+            }
+        }
+
+        // Predict next move based on Markov chain
+        function predictNextMove(history) {
+            if (history.length < 2) {
+                // Random choice if not enough history
+                const moves = ['R', 'P', 'S'];
+                return moves[Math.floor(Math.random() * 3)];
+            }
+            
+            const state = history[history.length - 2] + history[history.length - 1];
+            const probs = markovChain[state];
+            
+            if (!probs) return 'R'; // Fallback
+            
+            const total = probs.R + probs.P + probs.S;
+            
+            // If no data yet, random choice
+            if (total === 0) {
+                const moves = ['R', 'P', 'S'];
+                return moves[Math.floor(Math.random() * 3)];
+            }
+            
+            // Weighted random choice based on probabilities
+            const rand = Math.random() * total;
+            let cumulative = 0;
+            
+            for (let move of ['R', 'P', 'S']) {
+                cumulative += probs[move];
+                if (rand < cumulative) {
+                    return move;
+                }
+            }
+            
+            return 'R'; // Fallback
+        }
+
+        // Get counter move
+        function getCounterMove(predictedMove) {
+            const counters = {
+                'R': 'P',  // Paper beats Rock
+                'P': 'S',  // Scissors beats Paper
+                'S': 'R'   // Rock beats Scissors
+            };
+            return counters[predictedMove];
+        }
+
+        // Determine winner
+        function getWinner(playerMove, aiMove) {
+            if (playerMove === aiMove) return 'tie';
+            
+            const wins = {
+                'R': 'S',  // Rock beats Scissors
+                'P': 'R',  // Paper beats Rock
+                'S': 'P'   // Scissors beats Paper
+            };
+            
+            return wins[playerMove] === aiMove ? 'player' : 'ai';
+        }
+
+        // Format move name
+        function getMoveName(move) {
+            const names = { 'R': 'Rock', 'P': 'Paper', 'S': 'Scissors' };
+            return names[move];
+        }
+
+        // Format move emoji
+        function getMoveEmoji(move) {
+            const emojis = { 'R': '✊', 'P': '✋', 'S': '✌️' };
+            return emojis[move];
+        }
+
+        // Player makes a move
+        function playerMove(move) {
+            // Show thinking animation
+            document.getElementById('ai-thinking-text').style.display = 'block';
+            
+            setTimeout(() => {
+                document.getElementById('ai-thinking-text').style.display = 'none';
+                
+                // Predict player's move and counter it
+                const predictedMove = predictNextMove(moveHistory);
+                const aiMove = getCounterMove(predictedMove);
+                
+                // Add player move to history
+                moveHistory.push(move);
+                
+                // Update Markov chain
+                updateMarkovChain(moveHistory);
+                
+                // Determine winner
+                const winner = getWinner(move, aiMove);
+                
+                // Update scores
+                if (winner === 'player') {
+                    playerScore++;
+                } else if (winner === 'ai') {
+                    aiScore++;
+                } else {
+                    tieScore++;
+                }
+                
+                // Update display
+                updateScoreDisplay();
+                updateResultDisplay(move, aiMove, winner, predictedMove);
+                updateHistoryDisplay();
+                updateMarkovDisplay();
+            }, 300);
+        }
+
+        // Update score display
+        function updateScoreDisplay() {
+            document.getElementById('player-score').textContent = playerScore;
+            document.getElementById('ai-score').textContent = aiScore;
+            document.getElementById('tie-score').textContent = tieScore;
+        }
+
+        // Update result display
+        function updateResultDisplay(playerMove, aiMove, winner, predictedMove) {
+            const resultDiv = document.getElementById('result-display');
+            
+            let resultClass = '';
+            let resultText = '';
+            let detailText = '';
+            
+            if (winner === 'player') {
+                resultClass = 'win';
+                resultText = 'You Win!';
+                detailText = `${getMoveEmoji(playerMove)} ${getMoveName(playerMove)} beats ${getMoveEmoji(aiMove)} ${getMoveName(aiMove)}`;
+            } else if (winner === 'ai') {
+                resultClass = 'lose';
+                resultText = 'AI Wins!';
+                detailText = `${getMoveEmoji(aiMove)} ${getMoveName(aiMove)} beats ${getMoveEmoji(playerMove)} ${getMoveName(playerMove)}`;
+            } else {
+                resultClass = 'tie';
+                resultText = 'Tie!';
+                detailText = `Both played ${getMoveEmoji(playerMove)} ${getMoveName(playerMove)}`;
+            }
+            
+            const predictionText = moveHistory.length >= 2 
+                ? ` • AI predicted you'd play ${getMoveName(predictedMove)}` 
+                : '';
+            
+            resultDiv.innerHTML = `
+                <div class="result-text ${resultClass}">${resultText}</div>
+                <div class="result-detail">${detailText}${predictionText}</div>
+            `;
+        }
+
+        // Update history display
+        function updateHistoryDisplay() {
+            const historyDiv = document.getElementById('history');
+            
+            if (moveHistory.length === 0) {
+                historyDiv.innerHTML = '<div style="color: var(--text-dim);">No moves yet...</div>';
+                return;
+            }
+            
+            // Show last 10 moves
+            const recentMoves = moveHistory.slice(-10);
+            
+            historyDiv.innerHTML = recentMoves.map((move, idx) => {
+                const roundNum = moveHistory.length - recentMoves.length + idx + 1;
+                return `
+                    <div class="history-item">
+                        <span style="color: var(--text-dim);">#${roundNum}</span>
+                        <span class="history-separator">→</span>
+                        <span class="history-player">${getMoveEmoji(move)}</span>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        // Update Markov chain visualization
+        function updateMarkovDisplay() {
+            const chainDiv = document.getElementById('chain-viz');
+            
+            if (moveHistory.length < 2) {
+                chainDiv.innerHTML = '<div style="color: var(--text-dim); grid-column: 1 / -1; text-align: center;">Need at least 2 moves to build pattern matrix...</div>';
+                return;
+            }
+            
+            // Show all states that have been visited
+            const states = Object.keys(markovChain).filter(state => {
+                const counts = markovChain[state];
+                return counts.R + counts.P + counts.S > 0;
+            });
+            
+            if (states.length === 0) {
+                chainDiv.innerHTML = '<div style="color: var(--text-dim); grid-column: 1 / -1; text-align: center;">Collecting data...</div>';
+                return;
+            }
+            
+            chainDiv.innerHTML = states.map(state => {
+                const counts = markovChain[state];
+                const total = counts.R + counts.P + counts.S;
+                
+                return `
+                    <div class="chain-state">
+                        <div class="state-label">${getMoveEmoji(state[0])} → ${getMoveEmoji(state[1])} Then...</div>
+                        <div class="state-probs">
+                            <div class="prob-bar">
+                                <div class="prob-label">${getMoveEmoji('R')}</div>
+                                <div class="prob-track">
+                                    <div class="prob-fill" style="width: ${total > 0 ? (counts.R / total * 100) : 0}%"></div>
+                                </div>
+                                <div class="prob-value">${total > 0 ? Math.round(counts.R / total * 100) : 0}%</div>
+                            </div>
+                            <div class="prob-bar">
+                                <div class="prob-label">${getMoveEmoji('P')}</div>
+                                <div class="prob-track">
+                                    <div class="prob-fill" style="width: ${total > 0 ? (counts.P / total * 100) : 0}%"></div>
+                                </div>
+                                <div class="prob-value">${total > 0 ? Math.round(counts.P / total * 100) : 0}%</div>
+                            </div>
+                            <div class="prob-bar">
+                                <div class="prob-label">${getMoveEmoji('S')}</div>
+                                <div class="prob-track">
+                                    <div class="prob-fill" style="width: ${total > 0 ? (counts.S / total * 100) : 0}%"></div>
+                                </div>
+                                <div class="prob-value">${total > 0 ? Math.round(counts.S / total * 100) : 0}%</div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        // Reset game
+        function resetGame() {
+            playerScore = 0;
+            aiScore = 0;
+            tieScore = 0;
+            moveHistory = [];
+            initMarkovChain();
+            
+            updateScoreDisplay();
+            updateHistoryDisplay();
+            updateMarkovDisplay();
+            
+            document.getElementById('result-display').innerHTML = `
+                <div class="result-text">Ready</div>
+                <div class="result-detail">Make your move to begin</div>
+            `;
+        }
+
+        // Initialize on load
+        initMarkovChain();
+        updateMarkovDisplay();
+    </script>
+</body>
+</html>
